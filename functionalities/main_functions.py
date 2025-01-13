@@ -8,6 +8,7 @@ import time
 from keras_tuner import BayesianOptimization, Objective
 from keras.callbacks import ReduceLROnPlateau, LearningRateScheduler
 from keras import backend as K
+from sklearn.metrics import accuracy_score
 
 def extract_data(data_dir, work_dir, fwf_av, capsel, growsel):
     """
@@ -74,8 +75,7 @@ def preprocess_data(full_pathlist, ssstest, capsel, growsel, elimper, maxpcscale
         logging.info("Resampling point clouds...")
         pointclouds_for_resampling = [preprocessing.load_point_cloud(file) for file in filtered_pointclouds]
         centered_points = preprocessing.center_point_cloud(pointclouds_for_resampling)
-        resampled_pointclouds = np.array([preprocessing.resample_pointcloud(points, netpcsize) for points in centered_points])
-        #resampled_pointclouds = np.array([preprocessing.resample_point_cloud_density_based(points, netpcsize) for points in centered_points])
+        resampled_pointclouds = np.array([preprocessing.resample_pointcloud(centered_points, netpcsize, i) for i in range(len(centered_points))])
         logging.info("Generating metrics for point clouds...")
         combined_metrics_all, feature_names = preprocessing.generate_metrics_for_selected_pointclouds_fwf(filtered_pointclouds, filtered_fwf_pointclouds, full_pathlist[9], capsel, growsel)
         images_frontal, images_sideways = preprocessing.match_images_with_pointclouds(filtered_pointclouds, filtered_images)
@@ -92,8 +92,7 @@ def preprocess_data(full_pathlist, ssstest, capsel, growsel, elimper, maxpcscale
         logging.info("Resampling point clouds...")
         pointclouds_for_resampling = [preprocessing.load_point_cloud(file) for file in filtered_pointclouds]
         centered_points = preprocessing.center_point_cloud(pointclouds_for_resampling)
-        resampled_pointclouds = np.array([preprocessing.resample_pointcloud(points, netpcsize) for points in centered_points])
-        #resampled_pointclouds = np.array([preprocessing.resample_point_cloud_density_based(points, netpcsize) for points in centered_points])
+        resampled_pointclouds = np.array([preprocessing.resample_pointcloud(centered_points, netpcsize, i) for i in range(len(centered_points))])
         logging.info("Generating metrics for point clouds...")
         combined_metrics_all, feature_names = preprocessing.generate_metrics_for_selected_pointclouds(filtered_pointclouds, full_pathlist[6], capsel, growsel)
         images_frontal, images_sideways = preprocessing.match_images_with_pointclouds(filtered_pointclouds, filtered_images)
@@ -134,9 +133,8 @@ def perform_hp_tuning(model_dir, X_pc_train, X_img_1_train, X_img_2_train, X_met
     image_shape = (netimgsize, netimgsize, 3)
     metrics_shape = (X_metrics_train.shape[1],)
     batch_size = bsize
-    # Hyperparameter tuning for 15 trials with 12 epochs each
-    num_hp_epochs = 12
-    num_hp_trials = 15
+    num_hp_epochs = 7
+    num_hp_trials = 10
     os.chdir(model_dir)
     # Clear the backend to free up memory
     tf.keras.backend.clear_session()
@@ -177,7 +175,7 @@ def perform_hp_tuning(model_dir, X_pc_train, X_img_1_train, X_img_2_train, X_met
         project_name='tree_classification'
     )
     # Definition of learning rate schedule and Callbacks
-    reduce_lr = ReduceLROnPlateau(monitor='val_accuracy', factor=0.985, patience=5, min_lr=1e-7)
+    reduce_lr = ReduceLROnPlateau(monitor='val_accuracy', factor=0.995, patience=5, min_lr=5e-7)
     degrade_lr = LearningRateScheduler(model_utils.scheduler)
     macro_f1_callback = model_utils.MacroF1ScoreCallback(validation_data=val_gen, batch_size=batch_size)
     custom_scoring_callback = model_utils.WeightedResultsCallback(validation_data=val_gen, batch_size=batch_size)
@@ -195,7 +193,6 @@ def perform_hp_tuning(model_dir, X_pc_train, X_img_1_train, X_img_2_train, X_met
     untrained_model = combined_model.get_untrained_model(best_hyperparameters)
     untrained_model.summary()
     gc.collect()
-    K.clear_session()
     return untrained_model
 
 def perform_training(model, bsz, X_pc_train, X_img_1_train, X_img_2_train, X_metrics_train, y_train, X_pc_val, X_img_1_val, X_img_2_val, X_metrics_val, y_val, modeldir, label_dict, capsel, growsel, netpcsize, fwf_av):
@@ -230,7 +227,7 @@ def perform_training(model, bsz, X_pc_train, X_img_1_train, X_img_2_train, X_met
     # Compilation of the tuned model with learning rate and training matrics
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=7.5e-6),
-        loss='categorical_crossentropy',
+        loss=model_utils.precision_recall_loss, #'categorical_crossentropy',
         metrics=['accuracy', tf.keras.metrics.Precision(name="precision"), tf.keras.metrics.Recall(name="recall"), tf.keras.metrics.AUC(name="pr_curve", curve="PR"), tf.keras.metrics.PrecisionAtRecall(0.85, name="pr_at_rec"), tf.keras.metrics.RecallAtPrecision(0.85, name="rec_at_pr")]
     )
     # Print model summary
@@ -257,8 +254,8 @@ def perform_training(model, bsz, X_pc_train, X_img_1_train, X_img_2_train, X_met
     train_gen.on_epoch_end()
     val_gen.on_epoch_end()
     # Callback definition
-    early_stopping = tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
-    reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(monitor='val_accuracy', factor=0.985, patience=3, min_lr=2e-7)
+    early_stopping = tf.keras.callbacks.EarlyStopping(monitor='val_accuracy', patience=20, restore_best_weights=True)
+    reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(monitor='val_accuracy', factor=0.95, patience=3, min_lr=1e-6)
     degrade_lr = tf.keras.callbacks.LearningRateScheduler(model_utils.scheduler)
     macro_f1_callback = model_utils.MacroF1ScoreCallback(validation_data=val_gen, batch_size=bsz)
     custom_scoring_callback = model_utils.WeightedResultsCallback(validation_data=val_gen, batch_size=bsz)
@@ -267,7 +264,7 @@ def perform_training(model, bsz, X_pc_train, X_img_1_train, X_img_2_train, X_met
     # Model training setup with 300 epochs and early stopping
     history = model.fit(
         train_gen,
-        epochs=300,
+        epochs=150,
         validation_data=val_gen,
         class_weight=model_utils.generate_class_weights(y_train),
         callbacks=[early_stopping, reduce_lr, degrade_lr, macro_f1_callback, custom_scoring_callback],
@@ -287,7 +284,6 @@ def perform_training(model, bsz, X_pc_train, X_img_1_train, X_img_2_train, X_met
         model.save(model_file_path, save_format="keras")
     except:
         pass
-    K.clear_session()
     # Prediction on validation data
     predictions = model.predict([X_pc_val, X_img_1_val, X_img_2_val, X_metrics_val], batch_size=8, verbose=1)
     # Translation of labels
@@ -301,5 +297,4 @@ def perform_training(model, bsz, X_pc_train, X_img_1_train, X_img_2_train, X_met
     model_path = model_utils.get_trained_model_folder(modeldir, capsel, growsel)
     trained_model = model_utils.load_trained_model_from_folder(model_path)
     gc.collect()
-    K.clear_session()
     return trained_model

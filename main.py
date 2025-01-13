@@ -6,6 +6,10 @@ from utils import main_utils
 from functionalities import main_functions, model_utils
 
 def run_mmtscnet():
+    """
+    Main function used to preprocess data, tune and train MMTSCNet.
+
+    """
     gpus = tf.config.list_physical_devices('GPU')
     if len(gpus)>0:
         args = main_utils.parse_arguments()
@@ -33,4 +37,8 @@ def run_mmtscnet():
         logging.exception("No NVIDIA GPU detected! Can't run MMTSCNet!")
 
 if __name__ == "__main__":
+    """
+    Runs the program.
+
+    """
     run_mmtscnet()

@@ -15,16 +15,13 @@ from sklearn.preprocessing import MinMaxScaler
 from sklearn.utils.class_weight import compute_class_weight
 import matplotlib.pyplot as plt
 import seaborn as sns
-import re
 import datetime
-from functionalities import model_utils
 import logging
 import laspy as lp
 import open3d as o3d
-from scipy.spatial import KDTree
-import time
-from functionalities import workspace_setup
+from functionalities import workspace_setup, model_utils
 import pandas as pd
+from keras import backend as K
 
 # Logging setup for tensorflow
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
@@ -32,6 +29,31 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 from keras import mixed_precision
 policy = mixed_precision.Policy('mixed_float16')
 mixed_precision.set_global_policy(policy)
+
+def precision_recall_loss(y_true, y_pred, alpha=0.4):
+    """
+    Custom loss function that balances precision and recall.
+    Args:
+    y_true: Ground truth labels (one-hot encoded).
+    y_pred: Predicted probabilities for each class.
+    alpha: Weight for precision and recall (0.5 gives equal weight).
+    Returns:
+    Loss based on a weighted combination of precision and recall.
+    """
+    epsilon = K.epsilon()
+    # Convert predictions to binary values
+    y_pred = K.round(y_pred)
+    # Calculate true positives, false positives, false negatives
+    tp = K.sum(y_true * y_pred, axis=0)
+    fp = K.sum((1 - y_true) * y_pred, axis=0)
+    fn = K.sum(y_true * (1 - y_pred), axis=0)
+    # Calculate precision and recall
+    precision = tp / (tp + fp + epsilon)
+    recall = tp / (tp + fn + epsilon)
+    # Weighted combination of precision and recall
+    loss = alpha * (1 - precision) + (1 - alpha) * (1 - recall)
+    # Return the average loss across all classes
+    return K.mean(loss)
 
 def scheduler(epoch, lr):
     """
@@ -46,10 +68,10 @@ def scheduler(epoch, lr):
     """
     if epoch < 5:
         return lr * 1.2
-    elif epoch >= 5 and epoch < 13:
+    elif epoch >= 5 and epoch < 15:
         return lr
     else:
-        if lr >= 5e-7:
+        if lr >= 5e-6:
             return lr * 0.95
         else:
             return lr
@@ -444,23 +466,29 @@ def plot_conf_matrix(true_labels, predicted_labels, modeldir, plot_path, label_d
 
 def plot_best_epoch_metrics(history, modeldir):
     """
-    Plot a table of training metrics.
+    Plot a table of training metrics in columns.
 
     Args:
-    history: Keras obejct with training metrics saved.
-    modeldir: Savepath for model.
+        history: Keras object with training metrics saved.
+        modeldir: Save path for model.
     """
     # Extract the epoch with the best validation accuracy
     best_epoch = np.argmax(history.history['val_accuracy'])
     # Extract metrics for the best epoch
     best_metrics = {metric: values[best_epoch] for metric, values in history.history.items()}
-    # Convert the metrics to a DataFrame
-    metrics_df = pd.DataFrame(best_metrics, index=[best_epoch])
+    # Convert the metrics to a DataFrame and transpose it for column layout
+    metrics_df = pd.DataFrame(best_metrics, index=[f'Epoch {best_epoch}']).transpose()
     # Plot the metrics as a table
-    fig, ax = plt.subplots(figsize=(30, 10))
+    fig, ax = plt.subplots(figsize=(10, len(metrics_df) * 0.5))  # Adjust figure size for better readability
     ax.axis('tight')
     ax.axis('off')
-    table = ax.table(cellText=metrics_df.values, colLabels=metrics_df.columns, rowLabels=['Best Epoch'], cellLoc='center', loc='center')
+    table = ax.table(
+        cellText=metrics_df.values,
+        rowLabels=metrics_df.index,
+        colLabels=metrics_df.columns,
+        cellLoc='center',
+        loc='center'
+    )
     table.auto_set_font_size(False)
     table.set_fontsize(12)
     table.auto_set_column_width(col=list(range(len(metrics_df.columns))))
@@ -630,12 +658,16 @@ class PointCloudExtractor(tf.keras.layers.Layer):
 
     def build(self, input_shape):
         # Hyperparameter configuration
-        num_conv1d = self.hp.Choice('pce_depth', [1, 2, 3, 4])
+        num_conv1d = self.hp.Choice('pce_depth', [1, 2, 3, 4, 5])
         hp_kernel_size = self.hp.Choice('mmtsc_kernel_size', values=[1, 3])
-        hp_units = self.hp.Choice('mmtsc_units', values=[256, 512, 1024])
-        hp_dropout_rate = self.hp.Float('mmtsc_dropout_rate', min_value=0.2, max_value=0.6, step=0.05)
-        hp_regularizer_value = self.hp.Float('mmtsc_regularization', min_value=0.003, max_value=0.01, step=0.001)
-        mlp_first = self.hp.Int('mmtsc_mlp_first', min_value=16, max_value=256, step=16)
+        hp_units = self.hp.Choice('mmtsc_units', values=[128, 256, 512, 1024])
+        hp_dropout_rate = self.hp.Float('mmtsc_dropout_rate', min_value=0.1, max_value=0.5, step=0.05)
+        hp_regularizer_value = self.hp.Float('mmtsc_regularization', min_value=0.001, max_value=0.02, step=0.001)
+        mlp_first = self.hp.Int('mmtsc_mlp_first', min_value=16, max_value=512, step=16)
+        hp_rad_1 = self.hp.Float('mmtsc_msg_radius_1', min_value=0.01, max_value=0.19, step=0.01)
+        hp_rad_2 = self.hp.Float('mmtsc_msg_radius_2', min_value=0.20, max_value=0.39, step=0.01)
+        hp_rad_3 = self.hp.Float('mmtsc_msg_radius_3', min_value=0.40, max_value=0.99, step=0.01)
+        hp_msg_neighbors = self.hp.Int('mmtsc_msg_neighbors', min_value=8, max_value=128, step=8)
         # Input shape definition
         input_shape = input_shape.as_list()
         units_tnetless = input_shape[-1]
@@ -659,6 +691,7 @@ class PointCloudExtractor(tf.keras.layers.Layer):
         self.bnorm4 = BatchNormalization(name="mmtsc_bnorm_4")
         self.relu3 = ReLU(name="mmtsc_relu_3")
         self.dropout3 = Dropout(hp_dropout_rate, name="mmtsc_dropout_3")
+        self.att_weights= Dense(1, activation='softmax', name="attention_weights")
         self.conv_blocks = []
         for i in range(1, num_conv1d + 1):
             filters = hp_units // (i * 2)
@@ -669,15 +702,37 @@ class PointCloudExtractor(tf.keras.layers.Layer):
             self.conv_blocks.append((conv, bnorm, relu, dropout))
         self.maxp2 = GlobalMaxPooling1D(name="mmtsc_maxp_2")
         self.bnorm_globf = BatchNormalization(name="mmtsc_bnorm_glob")
+        self.radii = [hp_rad_1, hp_rad_2, hp_rad_3]
+        self.msg_neighbors = hp_msg_neighbors
 
     def call(self, inputs):
         # Data processing stream definition
         transform = self.transform(inputs)
         point_cloud_transformed = tf.matmul(inputs, transform)
         batch_size = tf.shape(inputs)[0]
-        indices = tf.random.uniform((batch_size, self.num_points, self.hp.Int('mmtsc_num_neighbors', min_value=8, max_value=64, step=8)), maxval=self.num_points, dtype=tf.int32)
-        features = tf.gather(point_cloud_transformed, indices, axis=1, batch_dims=1)
-        features = tf.reshape(features, (batch_size, self.num_points, self.hp.Int('mmtsc_num_neighbors', min_value=8, max_value=64, step=8) * inputs.shape[-1]))
+        ################################## (SSG)
+        #indices = tf.random.uniform((batch_size, self.num_points, self.hp.Int('mmtsc_num_neighbors', min_value=8, max_value=64, step=8)), maxval=self.num_points, dtype=tf.int32)
+        #features = tf.gather(point_cloud_transformed, indices, axis=1, batch_dims=1)
+        #features = tf.reshape(features, (batch_size, self.num_points, self.hp.Int('mmtsc_num_neighbors', min_value=8, max_value=64, step=8) * inputs.shape[-1]))
+        ################################## (MSG)
+        radii = self.radii
+        grouped_features = []
+        for radius in radii:
+            num_neighbors = self.msg_neighbors
+            indices = tf.random.uniform(
+                (batch_size, self.num_points, num_neighbors),
+                maxval=self.num_points,
+                dtype=tf.int32
+            )
+            grouped_feature = tf.gather(point_cloud_transformed, indices, axis=1, batch_dims=1)
+            grouped_features.append(grouped_feature)
+        features = tf.concat(grouped_features, axis=-1)
+        input_dim = point_cloud_transformed.shape[-1]
+        total_channels = len(radii) * num_neighbors * input_dim
+        features = tf.reshape(features, (batch_size, self.num_points, total_channels))
+        if features.shape[-1] is None:
+            raise ValueError("Channel dimension of the features is undefined.")
+        ##################################
         features = self.conv1(features)
         features = self.bnorm1(features)
         features = self.relu1(features)
@@ -687,6 +742,10 @@ class PointCloudExtractor(tf.keras.layers.Layer):
         features = self.relu2(features)
         features = self.dropout2(features)
         features = self.maxp1(features)
+        ########################################
+        attention_weights = self.att_weights(features)
+        features = tf.multiply(features, attention_weights)
+        ############################################
         features = self.bnorm3(features)
         features = tf.expand_dims(features, axis=1)
         features = tf.tile(features, [1, self.num_points, 1])
@@ -729,9 +788,9 @@ class TNetLess(tf.keras.layers.Layer):
 
     def build(self, input_shape):
         # Hyperparameter configuration
-        hp_units_value = self.hp.Choice('t_net_units', values=[8, 16, 32, 64, 128, 256])
-        hp_regularizer_value = self.hp.Float('t_net_regularization', min_value=0.003, max_value=0.01, step=0.001)
-        hp_dropout_rate_t_net = self.hp.Float('t_net_dropout_rate', min_value=0.2, max_value=0.6, step=0.05)
+        hp_units_value = self.hp.Choice('t_net_units', values=[16, 32, 64, 128, 256])
+        hp_regularizer_value = self.hp.Float('t_net_regularization', min_value=0.001, max_value=0.02, step=0.001)
+        hp_dropout_rate_t_net = self.hp.Float('t_net_dropout_rate', min_value=0.1, max_value=0.5, step=0.05)
         # Layer setup
         self.conv1 = Conv1D(hp_units_value, 1, kernel_regularizer=L1L2(l1=hp_regularizer_value, l2=hp_regularizer_value), name="t_net_conv1d_1")
         self.bnorm1 = BatchNormalization(name="t_net_bnorm_1")
@@ -813,9 +872,9 @@ class EnhancedMetricsModel(tf.keras.layers.Layer):
 
     def build(self, input_shape):
         # Hyperparameter configuration
-        units = self.hp.Choice('metrics_units', values=[16, 32, 64, 128, 256])
-        dropout_rate = self.hp.Float('metrics_dropout_rate', min_value=0.2, max_value=0.6, step=0.05)
-        regularization = self.hp.Float('metrics_regularization', min_value=0.003, max_value=0.01, step=0.001)
+        units = self.hp.Choice('metrics_units', values=[16, 32, 64, 128, 256, 512])
+        dropout_rate = self.hp.Float('metrics_dropout_rate', min_value=0.1, max_value=0.5, step=0.05)
+        regularization = self.hp.Float('metrics_regularization', min_value=0.001, max_value=0.02, step=0.001)
         # Layer setup
         self.dense1 = Dense(units, activation='relu', kernel_regularizer=L1L2(l1=regularization, l2=regularization), name="metrics_dense_1")
         self.bnorm1 = BatchNormalization(name="metrics_bnorm_1")
@@ -889,8 +948,8 @@ class CombinedModel(HyperModel):
         # Hyperparameter setup
         num_dense = hp.Choice('clss_depth', [1, 2, 3, 4, 5])
         units_dense = hp.Choice('clss_units', [120, 240, 330, 480, 600])
-        dropout_clss = hp.Float('clss_dropout_rate', min_value=0.2, max_value=0.6, step=0.05)
-        regularizer_value_clss = hp.Float('clss_regularization', min_value=0.003, max_value=0.01, step=0.001)
+        dropout_clss = hp.Float('clss_dropout_rate', min_value=0.1, max_value=0.5, step=0.05)
+        regularizer_value_clss = hp.Float('clss_regularization', min_value=0.001, max_value=0.01, step=0.001)
         # Classification Head
         for i in range(1, num_dense + 1):
             units = int(units_dense/i)

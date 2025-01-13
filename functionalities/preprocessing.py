@@ -12,6 +12,7 @@ from collections import Counter
 from scipy.spatial import KDTree, ConvexHull
 from scipy.stats import kurtosis, skew
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.feature_selection import f_classif
 import random
 from utils import main_utils
 import logging
@@ -19,6 +20,7 @@ from random import uniform
 from sklearn.neighbors import NearestNeighbors
 from functionalities import workspace_setup
 import time
+from scipy.stats import spearmanr
 
 #----------------------------------------------------------------
 #---------             Numerical Features              ----------
@@ -649,6 +651,7 @@ def load_point_cloud(file_path):
     try:
         las_file = lp.read(file_path)
         points = np.vstack((las_file.x, las_file.y, las_file.z)).transpose()
+        logging.info("Successfully loaded point cloud %s", file_path)
     except OSError as e:
         logging.error("Error loading file %s: %s", file_path, e)
         raise
@@ -661,7 +664,6 @@ def pick_random_angle():
     Returns:
     random_angle: Generated angle in degrees.
     """
-    #Notice: 24 * 15 = 360
     random_index = random.randint(0, 24)
     random_angle = random_index * 15
     return random_angle
@@ -674,7 +676,6 @@ def adjust_las_header(las, points):
     las: Las file instance.
     points: Array of point cloud points.
     """
-    # Calculate new offset and scale based on the data range
     min_x, max_x = np.min(points[:, 0]), np.max(points[:, 0])
     min_y, max_y = np.min(points[:, 1]), np.max(points[:, 1])
     min_z, max_z = np.min(points[:, 2]), np.max(points[:, 2])
@@ -682,7 +683,6 @@ def adjust_las_header(las, points):
     new_scale = [(max_x - min_x) / (2**31 - 1), 
                  (max_y - min_y) / (2**31 - 1), 
                  (max_z - min_z) / (2**31 - 1)]
-    # Update the header with new offset and scale
     las.header.offset = new_offset
     las.header.scale = new_scale
     logging.debug("Updated Scale: %s", new_scale)
@@ -702,11 +702,9 @@ def augment_species_pointclouds_fwf(species_pc_pairs, max_representation, specie
     """
     pair_index = 0
     for species_pairs in species_pc_pairs:
-        # Retrieve augmentation upscaling species factor
         current_species = get_species_for_pairs_list(species_pairs)
         current_species_amount = get_abs_num(current_species, species_distribution)
         upscale_fac = get_upscale_factor(current_species_amount, max_representation)
-        # Filename separation and creation
         current_reg_pc = species_pairs[0]
         filename_reg_full = os.path.split(current_reg_pc)[1]
         filename_reg_ext = filename_reg_full.split(".")[-1]
@@ -719,25 +717,21 @@ def augment_species_pointclouds_fwf(species_pc_pairs, max_representation, specie
         filename_fwf_f = filename_fwf_full.split(".")[0]
         filenameparts_fwf = filename_fwf_f.split("_")[:-1]
         filename_fwf = filenameparts_fwf[0] + "_" + filenameparts_fwf[1] + "_" + filenameparts_fwf[2] + "_" + filenameparts_fwf[3] + "_" + filenameparts_fwf[4] + "_" + filenameparts_fwf[5] + "_" + filenameparts_fwf[6]
-        # Loading of las and FWF file
         reg_points, reg_pc = load_point_cloud_and_file(species_pairs[0])
         fwf_points, fwf_pc = load_point_cloud_and_file(species_pairs[1])
         logging.debug("Number of points reg: %s", len(reg_points))
         logging.debug("Number of points reg: %s", len(fwf_points))
-        # 4 augmentation loops
         for i in range(0, int(upscale_fac)*4):
             pair_index+=1
             outFile_r = lp.LasData(reg_pc.header)
             outFile_f = lp.LasData(fwf_pc.header)
             outFile_r.vlrs = reg_pc.vlrs
             outFile_f.vlrs = fwf_pc.vlrs
-            # Rotate point cloud by random angle
             angle = pick_random_angle()
             exported_points_reg = reg_points
             exported_points_fwf = fwf_points
             rotated_reg_pc = rotate_point_cloud(exported_points_reg, angle)
             rotated_fwf_pc = rotate_point_cloud(exported_points_fwf, angle)
-            # Scale point cloud
             scale_factors = np.random.uniform(1 - max_scale, 1 + max_scale, size=3)
             scaled_rotated_reg_pc = scale_point_cloud(rotated_reg_pc, scale_factors)
             scaled_rotated_fwf_pc = scale_point_cloud(rotated_fwf_pc, scale_factors)
@@ -749,7 +743,6 @@ def augment_species_pointclouds_fwf(species_pc_pairs, max_representation, specie
             outFile_f.x = scaled_rotated_fwf_pc[:, 0]
             outFile_f.y = scaled_rotated_fwf_pc[:, 1]
             outFile_f.z = scaled_rotated_fwf_pc[:, 2]
-            # Save augmented point clouds
             new_filename_reg = f"{filename_reg}_aug0{pair_index}{i}.{filename_reg_ext}"
             new_filename_fwf = f"{filename_fwf}_aug0{pair_index}{i}.{filename_fwf_ext}"
             savepath_reg = os.path.join(pc_path_selection, new_filename_reg)
@@ -834,18 +827,13 @@ def rotate_point_cloud(point_cloud, angle):
     Returns:
     rotated_point_cloud: Las point cloud points array.
     """
-    # Convert degrees to radians
     angle_rad = np.radians(angle)
-    # Define rotation matrix around up-axis
     R = np.array([[np.cos(angle_rad), -np.sin(angle_rad), 0],
                   [np.sin(angle_rad), np.cos(angle_rad), 0],
                   [0, 0, 1]])
-    # Convert point cloud to Open3D PointCloud object
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(point_cloud)
-    # Rotate point cloud
     pcd.rotate(R, center=(0, 0, 0))
-    # Convert back to NumPy array
     rotated_point_cloud = np.asarray(pcd.points)
     return rotated_point_cloud
 
@@ -860,7 +848,6 @@ def scale_point_cloud(point_cloud, scale_factors):
     Returns:
     scaled_point_cloud: Scaled array of las point cloud points.
     """
-    # Manually apply scaling factors to each axis
     scaled_point_cloud = point_cloud * scale_factors
     return scaled_point_cloud
 
@@ -917,14 +904,11 @@ def generate_colored_images(IMG_SIZE, las_working_folder, img_working_folder):
     las_working_folder: Filepath to las point clouds.
     img_working_folder: Savepath for generated images.
     """
-    # Check if images have previously been generated
     if get_colored_images_generated(las_working_folder, img_working_folder) == False:
         pcid = 0
-        # Create frontal and sideways images for each point cloud
         for pointcloud in os.listdir(las_working_folder):
             pointcloud_path = main_utils.join_paths(las_working_folder, pointcloud)
             pc = lp.read(pointcloud_path)
-            # Filename operations
             tree_id = pointcloud.split("_")[0]
             species = pointcloud.split("_")[2]
             method = pointcloud.split("_")[3]
@@ -932,7 +916,6 @@ def generate_colored_images(IMG_SIZE, las_working_folder, img_working_folder):
             ind_id = pointcloud.split("_")[5]
             leaf_cond = pointcloud.split("_")[6]
             augnum = pointcloud.split("_")[7].split(".")[0]
-            # Creation of voxel grid, padding and saving of images
             voxels = create_voxel_grid_from_las(pc)
             vox_pos_list, max_img_size = get_voxel_positions(voxels)
             zero_frontal_image, zero_sideways_image = create_empty_images(max_img_size)
@@ -1400,7 +1383,9 @@ def filter_classes_by_representation(selected_pointclouds, threshold):
     total_samples = len(tree_labels)
     label_counts = Counter(tree_labels)
     class_percentages = {label: count / total_samples * 100 for label, count in label_counts.items()}
-    valid_classes = ["FagSyl", "PicAbi", "PseMen", "QuePet"]#[label for label, percentage in class_percentages.items() if percentage >= threshold]
+    logging.info(f"Class percentages: {class_percentages}")
+    #valid_classes = ["FagSyl", "PicAbi", "PseMen", "QuePet"]
+    valid_classes = [label for label, percentage in class_percentages.items() if percentage >= threshold]
     filtered_pointclouds = [pc for pc in selected_pointclouds if pc.split("/")[-1].split(".")[0].split("_")[2] in valid_classes]
     return filtered_pointclouds
 
@@ -1419,7 +1404,8 @@ def filter_images_by_representation(selected_images, threshold):
     total_samples = len(tree_labels)
     label_counts = Counter(tree_labels)
     class_percentages = {label: count / total_samples * 100 for label, count in label_counts.items()}
-    valid_classes = ["FagSyl", "PicAbi", "PseMen", "QuePet"]#[label for label, percentage in class_percentages.items() if percentage >= threshold]
+    #valid_classes = ["FagSyl", "PicAbi", "PseMen", "QuePet"]
+    valid_classes = [label for label, percentage in class_percentages.items() if percentage >= threshold]
     filtered_images = [im for im in selected_images if im.split("/")[-1].split(".")[0].split("_")[1] in valid_classes]
     return filtered_images
 
@@ -1490,7 +1476,6 @@ def resample_point_cloud_density_based(points, num_points, num_segments=20):
     points = np.array(points, dtype=np.float64)
     min_height = np.min(points[:, 2])
     max_height = np.max(points[:, 2])
-    # Automatically divide the point cloud into 20 height segments
     segment_height = (max_height - min_height) / num_segments
     segment_indices = np.floor((points[:, 2] - min_height) / segment_height).astype(int)
     segment_indices = np.clip(segment_indices, 0, num_segments - 1)
@@ -1502,7 +1487,6 @@ def resample_point_cloud_density_based(points, num_points, num_segments=20):
     resampled_points = []
     cumulative_segment_counts = np.cumsum(segment_counts).astype(int)
     segments = np.split(points, cumulative_segment_counts[:-1])
-    # Resample each segment
     for i, segment in enumerate(segments):
         if len(segment) > 0:
             num_sampled_points = int(points_per_segment[i])
@@ -1511,7 +1495,6 @@ def resample_point_cloud_density_based(points, num_points, num_segments=20):
             else:
                 indices = np.random.choice(len(segment), num_sampled_points, replace=True)
             resampled_points.extend(segment[indices])
-    # Add points back if the number of points is lower than the target
     while len(resampled_points) < num_points:
         additional_points_needed = int(num_points - len(resampled_points))
         indices = np.random.choice(points.shape[0], additional_points_needed, replace=True)
@@ -1594,81 +1577,6 @@ def generate_metrics_for_selected_pointclouds(selected_pointclouds, metrics_dir,
                      "surface_area", "surface_to_volume_ratio", "avg_nn_dist", "fract_dimension", "bb_dims", "crown_shape_indices"]
     return combined_metrics, feature_names
 
-def generate_metrics_for_selected_pointclouds_fwf_pred(selected_pointclouds, filtered_fwf_pointclouds, metrics_dir, capsel, growsel):
-    """
-    Generates numerical features for regular and FWF point clouds for predictions.
-
-    Args:
-    selected_pointclouds: List of point cloud paths.
-    filtered_fwf_pointclouds: List of FWF point cloud paths.
-    metrics_dir: Savepath for numerical features.
-    capsel: User-specified acquisition method.
-    growsel: User-specified leaf-condition.
-
-    Returns:
-    combined_metrics: Array of numerical features for each individual tree.
-    """
-    savename = f"prediction_generated_metrics_{capsel}_{growsel}.csv"
-    metrics_path = main_utils.join_paths(metrics_dir, savename)
-    if workspace_setup.get_are_fwf_pcs_extracted(metrics_dir) == False:
-        all_metrics = []
-        for i in range(len(selected_pointclouds)):
-            las_points = load_point_cloud(selected_pointclouds[i])
-            fwf_file = load_point_cloud_file(filtered_fwf_pointclouds[i])
-            metrics, feature_names = compute_combined_metrics_fwf(las_points, fwf_file)
-            arrmetrics = np.asarray(metrics)
-            all_metrics.append(arrmetrics)
-            logging.info("Computed %s/%s metrics!", i+1, len(selected_pointclouds))
-        save_metrics_to_csv_pandas(all_metrics, metrics_path)
-        combined_metrics = np.vstack(all_metrics)
-    else:
-        logging.info("Previously generated metrics found, importing!")
-        combined_metrics = load_metrics_from_path(metrics_path)
-        feature_names = ["height_quantile_25", "height_quantile_50", "height_quantile_75", "dens0", "dens1", "dens2", "dens3", "dens4", "dens5", "dens6", "dens7", "dens8", "dens9", "dec0",
-                     "dec1", "dec2", "dec3", "dec4", "dec5", "dec6", "dec7", "dec8", "max_crown_diameter", "clustering_degree", "intensity_mean", "intensity_std", "intensity_skewness", "intensity_kurtosis", "mean_pulse_widths",
-                     "max_height", "crown_height", "crown_volume", "segdens0",
-                     "segdens1", "segdens2", "segdens3", "segdens4", "segdens5", "segdens6", "segdens7", "tree_height", "highest_branch", "lowest_branch", "longest_spread", "longest_cross_spread",
-                     "equivalent_crown_diameter", "canopy_width_x", "canopy_width_y", "canopy_volume", "point_density", "lai", "canopy_closure", "crown_base_height", "std_dev_height",
-                     "height_kurtosis", "height_skewness", "crown_area", "crown_perimeter", "crown_volume_to_height_ratio", "canopy_cover_fraction", "stem_volume", "canopy_base_height", "fwhm", "echo_width",
-                     "surface_area", "surface_to_volume_ratio", "avg_nn_dist", "fract_dimension", "bb_dims", "crown_shape_indices"]
-    return combined_metrics, feature_names
-
-def generate_metrics_for_selected_pointclouds_pred(selected_pointclouds, metrics_dir, capsel, growsel):
-    """
-    Generates numerical features for point clouds.
-
-    Args:
-    selected_pointclouds: List of point cloud paths.
-    metrics_dir: Savepath for numerical features.
-    capsel: User-specified acquisition method.
-    growsel: User-specified leaf-condition.
-
-    Returns:
-    combined_metrics: Array of numerical features for each individual tree.
-    """
-    savename = f"prediction_generated_metrics_{capsel}_{growsel}.csv"
-    metrics_path = main_utils.join_paths(metrics_dir, savename)
-    if workspace_setup.get_are_fwf_pcs_extracted(metrics_dir) == False:
-        all_metrics = []
-        for i in range(len(selected_pointclouds)):
-            las_points = load_point_cloud(selected_pointclouds[i])
-            metrics, feature_names = compute_combined_metrics(las_points)
-            arrmetrics = np.asarray(metrics)
-            all_metrics.append(arrmetrics)
-            logging.info("Computed %s/%s metrics!", i+1, len(selected_pointclouds))
-        save_metrics_to_csv_pandas(all_metrics, metrics_path)
-        combined_metrics = np.vstack(all_metrics)
-    else:
-        logging.info("Previously generated metrics found, importing!")
-        combined_metrics = load_metrics_from_path(metrics_path)
-        feature_names = ["height_quantile_25", "height_quantile_50", "height_quantile_75", "dens0", "dens1", "dens2", "dens3", "dens4", "dens5", "dens6", "dens7", "dens8", "dens9", "dec0",
-                     "dec1", "dec2", "dec3", "dec4", "dec5", "dec6", "dec7", "dec8", "max_crown_diameter", "clustering_degree", "max_height", "crown_height", "crown_volume", "segdens0",
-                     "segdens1", "segdens2", "segdens3", "segdens4", "segdens5", "segdens6", "segdens7", "tree_height", "highest_branch", "lowest_branch", "longest_spread", "longest_cross_spread",
-                     "equivalent_crown_diameter", "canopy_width_x", "canopy_width_y", "canopy_volume", "point_density", "lai", "canopy_closure", "crown_base_height", "std_dev_height",
-                     "height_kurtosis", "height_skewness", "crown_area", "crown_perimeter", "crown_volume_to_height_ratio", "canopy_cover_fraction", "stem_volume", "canopy_base_height",
-                     "surface_area", "surface_to_volume_ratio", "avg_nn_dist", "fract_dimension", "bb_dims", "crown_shape_indices"]
-    return combined_metrics, feature_names
-
 def load_metrics_from_path(metrics_path):
     """
     Loads numerical features from a CSV file at the specified path.
@@ -1705,7 +1613,6 @@ def compute_combined_metrics_fwf(points, las_file):
     metrics: List of numerical features for the point cloud.
     """
     metrics = []
-    # Check if FWF point cloud contains intensity and waveform data
     if 'intensity' in las_file.point_format.dimension_names:
         intensities = las_file.intensity
     else:
@@ -1717,7 +1624,6 @@ def compute_combined_metrics_fwf(points, las_file):
             waveform_data = np.frombuffer(waveform_bytes, dtype=np.int16)
             all_waveform_data.extend(waveform_data)
     logging.debug("Waveform data: %s", all_waveform_data)
-    # Calculate metrics
     height_quantile_25 = compute_height_quantile(points, 25)
     height_quantile_50 = compute_height_quantile(points, 50)
     height_quantile_75 = compute_height_quantile(points, 75)
@@ -1762,7 +1668,6 @@ def compute_combined_metrics_fwf(points, las_file):
     fract_dimension = compute_fractal_dimension(points, k=2)
     bb_dims = compute_bounding_box_dimensions(points)
     crown_shape_indices = compute_crown_shape_indices(points)
-    # Append metrics to list
     metrics.extend([
         float(height_quantile_25), float(height_quantile_50), float(height_quantile_75),
         float(dens0), float(dens1), float(dens2), float(dens3), float(dens4), float(dens5), float(dens6), float(dens7), float(dens8), float(dens9),
@@ -1799,7 +1704,6 @@ def compute_combined_metrics(points):
     metrics: List of numerical features for the point cloud.
     """
     metrics = []
-    # Calculate the individual numerical features
     height_quantile_25 = compute_height_quantile(points, 25)
     height_quantile_50 = compute_height_quantile(points, 50)
     height_quantile_75 = compute_height_quantile(points, 75)
@@ -1837,7 +1741,6 @@ def compute_combined_metrics(points):
     fract_dimension = compute_fractal_dimension(points, k=2)
     bb_dims = compute_bounding_box_dimensions(points)
     crown_shape_indices = compute_crown_shape_indices(points)
-    # Attach them to the general list of metrics
     metrics.extend([
         float(height_quantile_25), float(height_quantile_50), float(height_quantile_75),
         float(dens0), float(dens1), float(dens2), float(dens3), float(dens4), float(dens5), float(dens6), float(dens7), float(dens8), float(dens9),
@@ -1913,15 +1816,12 @@ def print_class_distribution(y_train, y_val, y_pred, onehot_to_label_dict):
         y_val: One-hot encoded validation labels.
         onehot_to_label_dict: Dictionary to map numeric labels to class names.
     """
-    # Decode one-hot labels
     y_train_decoded = [onehot_to_label_dict[np.argmax(label)] for label in y_train]
     y_val_decoded = [onehot_to_label_dict[np.argmax(label)] for label in y_val]
     y_pred_decoded = [onehot_to_label_dict[np.argmax(label)] for label in y_pred]
-    # Count occurrences
     train_counts = Counter(y_train_decoded)
     val_counts = Counter(y_val_decoded)
     pred_counts = Counter(y_pred_decoded)
-    # Create a DataFrame for better visualization
     all_classes = sorted(set(train_counts.keys()).union(val_counts.keys()).union(pred_counts.keys()))
     data = {
         "Class": all_classes,
@@ -1932,7 +1832,6 @@ def print_class_distribution(y_train, y_val, y_pred, onehot_to_label_dict):
     df = pd.DataFrame(data)
     df["Total"] = df["Train Count"] + df["Validation Count"] + df["Prediction Count"]
     df.sort_values(by="Total", ascending=False, inplace=True)
-    # Print the table
     print("\nClass Distribution Statistics:\n")
     print(df.to_string(index=False))
 
@@ -1949,13 +1848,11 @@ def balance_classes(X_pc_unb, X_metrics_unb, X_img_1_unb, X_img_2_unb, y_pc_unb,
         X_balanced: Balanced input data.
         y_balanced: Balanced one-hot encoded labels.
     """
-    # Decode labels to original class names
     y_decoded = [onehot_to_label_dict[np.argmax(label)] for label in y_pc_unb]
     class_counts = Counter(y_decoded)
-    min_count = min(class_counts.values())  # Target count for all classes
+    min_count = min(class_counts.values())
     print(f"Class distribution before balancing: {class_counts}")
     print(f"Downsampling all classes to {min_count} samples.")
-    # Create balanced datasets
     X_pc_balanced, X_metrics_balanced, X_img_1_balanced, X_img_2_balanced, y_balanced = [], [], [], [], []
     for class_name in class_counts.keys():
         indices = [i for i, label in enumerate(y_decoded) if label == class_name]
@@ -1965,7 +1862,6 @@ def balance_classes(X_pc_unb, X_metrics_unb, X_img_1_unb, X_img_2_unb, y_pc_unb,
         X_img_1_balanced.extend(X_img_1_unb[selected_indices])
         X_img_2_balanced.extend(X_img_2_unb[selected_indices])
         y_balanced.extend(y_pc_unb[selected_indices])
-    # Convert back to arrays
     X_pc = np.array(X_pc_balanced)
     X_metrics = np.array(X_metrics_balanced)
     X_img_1 = np.array(X_img_1_balanced)
@@ -1974,6 +1870,45 @@ def balance_classes(X_pc_unb, X_metrics_unb, X_img_1_unb, X_img_2_unb, y_pc_unb,
     balanced_counts = Counter([onehot_to_label_dict[np.argmax(label)] for label in y_balanced])
     print(f"Class distribution after balancing: {balanced_counts}")
     return X_pc, X_metrics, X_img_1, X_img_2, y_pc
+
+def resample_pointcloud(pointclouds, target_num_points, iteration):
+    """
+    Resample a point cloud to a target number of points using non-uniform grid sampling
+    followed by farthest point sampling (FPS).
+
+    Args:
+        pointclouds (list of numpy.ndarray): List of input point clouds as Nx3 arrays.
+        target_num_points (int): Target number of points.
+        iteration (int): Index of the point cloud to resample.
+
+    Returns:
+        numpy.ndarray: Resampled point cloud with target_num_points points.
+    """
+    method = "NONE"
+    pointcloud = pointclouds[iteration]
+    num_points = len(pointcloud)
+    
+    if num_points > target_num_points:
+        # Downsample using farthest point sampling
+        sampled_pointcloud = farthest_point_sampling(pointcloud, target_num_points)
+        method = "FPS"
+    elif num_points < target_num_points:
+        # Upsample by interpolating new points and combining with original points
+        extra_points_needed = target_num_points - num_points
+        interpolated_points = interpolate_points(pointcloud, extra_points_needed)
+        sampled_pointcloud = np.vstack((pointcloud, interpolated_points))
+        method = "INTERP"
+    else:
+        # No resampling needed
+        sampled_pointcloud = pointcloud
+        method = "NONE"
+
+    logging.info(f"Resampled point cloud {iteration}/{len(pointclouds)} using {method} from {num_points} points to {len(sampled_pointcloud)} points")
+    if len(sampled_pointcloud) < target_num_points:
+        print("\033[31mPointcloud has an insufficient number of points!.\033[0m")
+    else:
+        print("\033[32mNumber of points is fine.\033[0m")
+    return sampled_pointcloud
 
 def farthest_point_sampling(pointcloud, num_samples):
     """
@@ -1994,34 +1929,23 @@ def farthest_point_sampling(pointcloud, num_samples):
         sampled_indices.append(farthest_point_idx)
         new_distances = np.linalg.norm(pointcloud - pointcloud[farthest_point_idx], axis=1)
         distances = np.minimum(distances, new_distances)
-    logging.info(f"Resampled point cloud to {len(pointcloud[sampled_indices])} points")
     return pointcloud[sampled_indices]
 
-def resample_pointcloud(pointcloud, target_num_points):
+def interpolate_points(pointcloud, extra_points_needed):
     """
-    Resample a point cloud to a target number of points using non-uniform grid sampling
-    followed by farthest point sampling (FPS).
+    Generate additional points by interpolating between randomly selected pairs of points.
 
     Args:
         pointcloud (numpy.ndarray): Input point cloud as an Nx3 array.
-        target_num_points (int): Target number of points.
+        extra_points_needed (int): Number of additional points to generate.
 
     Returns:
-        numpy.ndarray: Resampled point cloud with target_num_points points.
+        numpy.ndarray: Interpolated points as a (extra_points_needed)x3 array.
     """
-    # Non-uniform grid sampling
-    num_initial_points = min(4 * target_num_points, len(pointcloud))  # Reduce to a manageable size
-    grid_size = np.cbrt(len(pointcloud) / num_initial_points)  # Approximate grid size
-    grid = np.floor(pointcloud / grid_size).astype(int)
-    unique_grids, indices = np.unique(grid, axis=0, return_index=True)
-    reduced_pointcloud = pointcloud[indices]
-    # Farthest point sampling
-    if len(reduced_pointcloud) > target_num_points:
-        sampled_pointcloud = farthest_point_sampling(reduced_pointcloud, target_num_points)
-    else:
-        sampled_pointcloud = farthest_point_sampling(pointcloud, target_num_points)
-    logging.info(f"Resampled point cloud using FPS to {len(sampled_pointcloud)} points")
-    return sampled_pointcloud
+    indices = np.random.choice(len(pointcloud), size=(extra_points_needed, 2))
+    alpha = np.random.rand(extra_points_needed, 1)
+    interpolated_points = alpha * pointcloud[indices[:, 0]] + (1 - alpha) * pointcloud[indices[:, 1]]
+    return interpolated_points
 
 def generate_training_data(capsel, growsel, filtered_pointclouds, resampled_pointclouds, combined_metrics, images_frontal, images_sideways, sss_testsize, metrics_dir, rfe_threshold, feature_names):
     """
@@ -2064,17 +1988,17 @@ def generate_training_data(capsel, growsel, filtered_pointclouds, resampled_poin
             rfe_metrics.append(file)
         else:
             pass
-    # Recursive Feature Elimination (RFE)
     if len(rfe_metrics) > 0:
         rfe_metrics_path = main_utils.join_paths(metrics_dir, rfe_metrics[0])
         combined_eliminated_metrics = load_metrics_from_path(rfe_metrics_path)
         logging.debug("Loaded metrics of shape %s", combined_eliminated_metrics.shape)
     else:
-        combined_eliminated_metrics = perform_recursive_feature_elimination_with_threshold(capsel, growsel, combined_metrics, elimination_labels, metrics_dir, rfe_threshold, feature_names)
+        #combined_eliminated_metrics = perform_recursive_feature_elimination_with_threshold(capsel, growsel, combined_metrics, elimination_labels, metrics_dir, rfe_threshold, feature_names)
+        combined_eliminated_metrics, features = perform_statistical_rfe(capsel, growsel, combined_metrics, elimination_labels, metrics_dir, feature_names, p_value_threshold=0.05)
         logging.debug("Metrics shape after Recursive Feature Elimination: %s", combined_eliminated_metrics.shape)
     logging.debug("Tree species to train on: %s", np.unique(tree_labels))
-    # Label-Encoding
     logging.info("One-Hot encoding labels!")
+    logging.info(f"Metrics shape: {combined_eliminated_metrics.shape}")
     encoder = OneHotEncoder(sparse_output=False)
     y_orig = encoder.fit_transform(tree_labels.reshape(-1, 1))
     num_classes = len(encoder.categories_[0])
@@ -2084,8 +2008,7 @@ def generate_training_data(capsel, growsel, filtered_pointclouds, resampled_poin
     X_img_2_orig = images_sideways
     X_pc, X_metrics, X_img_1, X_img_2, y = balance_classes(X_pc_orig, X_metrics_orig, X_img_1_orig, X_img_2_orig, y_orig, onehot_to_label_dict)
     logging.info("Performing Stratified-Shuffle-Split!")
-    # Stratified Shuffle Split
-    sss = StratifiedShuffleSplit(n_splits=5, test_size=0.2, random_state=42)
+    sss = StratifiedShuffleSplit(n_splits=5, test_size=0.1, random_state=42)
     for train_index_temp, pred_index in sss.split(X_pc, np.argmax(y, axis=1)):
         X_pc_train_temp, X_pc_pred = X_pc[train_index_temp], X_pc[pred_index]
         X_metrics_train_temp, X_metrics_pred = X_metrics[train_index_temp], X_metrics[pred_index]
@@ -2101,6 +2024,56 @@ def generate_training_data(capsel, growsel, filtered_pointclouds, resampled_poin
         y_train, y_val = y_train_temp[train_index], y_train_temp[val_index]
     print_class_distribution(y_train, y_val, y_pred, onehot_to_label_dict)
     return X_pc_train, X_pc_val, X_pc_pred, X_metrics_train, X_metrics_val, X_metrics_pred, X_img_1_train, X_img_1_val, X_img_1_pred, X_img_2_train, X_img_2_val, X_img_2_pred, y_train, y_val, y_pred, num_classes, onehot_to_label_dict
+
+def perform_statistical_rfe(capsel, growsel, X, y, metrics_dir, feature_names, p_value_threshold=0.5, correlation_threshold=0.85):
+    """
+    Perform Statistical Recursive Feature Elimination with redundancy checks.
+    """
+    logging.info("Performing Statistical Recursive Feature Elimination!")
+    non_constant_mask = (X.std(axis=0) > 0)
+    X = X[:, non_constant_mask]
+    feature_names = [feature_names[i] for i in range(len(feature_names)) if non_constant_mask[i]]
+    iteration = 0
+    eliminated_feature_names = []
+    while True:
+        iteration += 1
+        logging.info(f"Iteration {iteration}: Performing statistical test for feature significance.")
+        f_scores, p_values = f_classif(X, y)
+        logging.debug(f"Iteration {iteration}: F-Scores: {f_scores}")
+        logging.debug(f"Iteration {iteration}: P-Values: {p_values}")
+        features_to_eliminate = np.where(p_values > p_value_threshold)[0]
+        features_to_keep = np.where(p_values <= p_value_threshold)[0]
+        eliminated_names = [feature_names[i] for i in features_to_eliminate]
+        retained_names = [feature_names[i] for i in features_to_keep]
+        logging.info(f"Iteration {iteration}: Eliminated Features: {eliminated_names}")
+        logging.info(f"Iteration {iteration}: Retained Features: {len(retained_names)}")
+        logging.debug(f"Threshold: {p_value_threshold}")
+        if len(features_to_eliminate) == 0:
+            logging.info("No further features to eliminate. Stopping RFE.")
+            break
+        X = X[:, features_to_keep]
+        feature_names = retained_names
+        eliminated_feature_names.extend(eliminated_names)
+    logging.info("Checking for redundant features via correlation.")
+    corr_matrix = pd.DataFrame(X).corr(method='spearman')
+    to_remove = set()
+    for i in range(len(corr_matrix)):
+        for j in range(i):
+            if abs(corr_matrix.iloc[i, j]) > correlation_threshold:
+                if X[:, i].var() > X[:, j].var():
+                    to_remove.add(j)
+                else:
+                    to_remove.add(i)
+    to_keep = [i for i in range(X.shape[1]) if i not in to_remove]
+    X = X[:, to_keep]
+    feature_names = [feature_names[i] for i in to_keep]
+    logging.info(f"Features Removed Due to Correlation: {len(to_remove)}")
+    logging.info(f"Final number of features kept: {len(feature_names)}")
+    logging.info(f"Features kept: {feature_names}")
+    savename = f"training_rfe_generated_metrics_{capsel}_{growsel}.csv"
+    metrics_path = os.path.join(metrics_dir, savename)
+    save_metrics_to_csv_pandas(X, metrics_path)
+    return X, feature_names
 
 def perform_recursive_feature_elimination_with_threshold(capsel, growsel, X, y, metrics_dir, importance_threshold, feature_names):
     """
@@ -2119,155 +2092,35 @@ def perform_recursive_feature_elimination_with_threshold(capsel, growsel, X, y, 
     X_reduced: Reduced feature set.
     """
     logging.info("Performing Recursive Feature Elimination!")
-    # Initialize the model
     model = RandomForestClassifier(random_state=42)
-    # Fit the model to get feature importances
     model.fit(X, y)
     feature_importances = model.feature_importances_
-    # Select features based on the importance threshold
     selected_features_mask = feature_importances > importance_threshold
     selected_feature_names = [name for name, selected in zip(feature_names, selected_features_mask) if selected]
     eliminated_feature_names = [name for name, selected in zip(feature_names, selected_features_mask) if not selected]
-    # Reduce the feature set
     X_reduced = X[:, selected_features_mask]
-    # Save reduced metrics to CSV
     savename = f"training_rfe_generated_metrics_{capsel}_{growsel}.csv"
     metrics_path = os.path.join(metrics_dir, savename)
     save_metrics_to_csv_pandas(X_reduced, metrics_path)
-    # Log and print feature elimination summary
     logging.info(f"Number of features kept: {len(selected_feature_names)}")
     logging.info(f"Number of features eliminated: {len(eliminated_feature_names)}")
     print(f"Selected Features: {selected_feature_names}")
     print(f"Eliminated Features: {eliminated_feature_names}")
-    # Plot feature importances
     importance_df = pd.DataFrame({
         "Feature": feature_names,
         "Importance": feature_importances
     }).sort_values(by="Importance", ascending=False)
-    plt.figure(figsize=(12, len(importance_df) / 2))  # Dynamically adjust height based on the number of features
+    plt.figure(figsize=(12, len(importance_df) / 2))
     plt.barh(importance_df["Feature"], importance_df["Importance"], color="skyblue")
-    # Add a vertical line at the threshold
     plt.axvline(x=importance_threshold, color='red', linestyle='--', label=f'Threshold ({importance_threshold:.2f})')
-    # Add labels and title
     plt.xlabel("Feature Importance")
     plt.ylabel("Features")
     plt.title("Feature Importances")
-    # Adjust layout to prevent feature name overlap
     plt.gca().invert_yaxis()
     plt.tight_layout()
-    # Add legend for the threshold line
     plt.legend()
-    # Save the plot
     plot_path = os.path.join(metrics_dir, f"feature_importances_{capsel}_{growsel}.png")
     plt.savefig(plot_path, bbox_inches="tight")
     plt.close()
     logging.info(f"Feature importances plot saved to {plot_path}")
     return X_reduced
-
-
-def perform_recursive_feature_elimination_with_threshold_pred(capsel, growsel, X, y, metrics_dir, importance_threshold, feature_names):
-    """
-    Perform Recursive Feature Elimination (RFE) using RandomForestClassifier and omit features with low importance.
-
-    Args:
-    capsel: User-specified acquisition method.
-    growsel: User-specified leaf-condition.
-    X: Features matrix.
-    y: Target vector.
-    metrics_dir: Savepath for numerical features.
-    importance_threshold: Threshold for feature importance to retain features.
-
-    Returns:
-    X_reduced: Reduced feature set.
-    """
-    logging.info("Performing Recursive Feature Elimination!")
-    # Initialize the model
-    model = RandomForestClassifier(random_state=42)
-    # Fit the model to get feature importances
-    model.fit(X, y)
-    feature_importances = model.feature_importances_
-    # Select features based on the importance threshold
-    selected_features_mask = feature_importances > importance_threshold
-    selected_feature_names = [name for name, selected in zip(feature_names, selected_features_mask) if selected]
-    eliminated_feature_names = [name for name, selected in zip(feature_names, selected_features_mask) if not selected]
-    # Reduce the feature set
-    X_reduced = X[:, selected_features_mask]
-    # Save reduced metrics to CSV
-    savename = f"training_rfe_generated_metrics_{capsel}_{growsel}.csv"
-    metrics_path = os.path.join(metrics_dir, savename)
-    save_metrics_to_csv_pandas(X_reduced, metrics_path)
-    # Log and print feature elimination summary
-    logging.info(f"Number of features kept: {len(selected_feature_names)}")
-    logging.info(f"Number of features eliminated: {len(eliminated_feature_names)}")
-    print(f"Selected Features: {selected_feature_names}")
-    print(f"Eliminated Features: {eliminated_feature_names}")
-    # Plot feature importances
-    importance_df = pd.DataFrame({
-        "Feature": feature_names,
-        "Importance": feature_importances
-    }).sort_values(by="Importance", ascending=False)
-    plt.figure(figsize=(12, len(importance_df) / 2))  # Dynamically adjust height based on the number of features
-    plt.barh(importance_df["Feature"], importance_df["Importance"], color="skyblue")
-    # Add a vertical line at the threshold
-    plt.axvline(x=importance_threshold, color='red', linestyle='--', label=f'Threshold ({importance_threshold:.2f})')
-    # Add labels and title
-    plt.xlabel("Feature Importance")
-    plt.ylabel("Features")
-    plt.title("Feature Importances")
-    # Adjust layout to prevent feature name overlap
-    plt.gca().invert_yaxis()
-    plt.tight_layout()
-    # Add legend for the threshold line
-    plt.legend()
-    # Save the plot
-    plot_path = os.path.join(metrics_dir, f"feature_importances_{capsel}_{growsel}.png")
-    plt.savefig(plot_path, bbox_inches="tight")
-    plt.close()
-    logging.info(f"Feature importances plot saved to {plot_path}")
-    return X_reduced
-
-def generate_prediction_data(capsel, growsel, filtered_pointclouds, resampled_pointclouds, combined_metrics, images_frontal, images_sideways, metrics_dir, rfe_threshold):
-    """
-    Generates prediction data for custom rpedictions with MMTSCNet.
-
-    Args:
-    capsel: User-specified acquisition method.
-    growsel: User-specified leaf-condition.
-    filtered_pointclouds: List of point cloud filepaths.
-    resampled_pointclouds: List of las point cloud points arrays.
-    combined_metrics: Array of numerical features.
-    images_frontal: Array of frontal image arrays.
-    images_sideways: Array of sideways image arrays.
-    metrics_dir: Savepath for numerical features.
-    importance_threshold: Threshold for feature importance to retain features.
-
-    Returns:
-    X_pc: Point clouds.
-    X_metrics: Numerical features.
-    X_img_1: Frontal images.
-    X_img_2: Sideways images.
-    onehot_to_label_dict: Dictionary to translate one-hot encoded labels to textual labels.
-    """
-    tree_labels = np.array(get_labels_for_trees(filtered_pointclouds))
-    label_encoder = LabelEncoder()
-    elimination_labels = label_encoder.fit_transform(tree_labels)
-    numeric_tree_labels = elimination_labels.astype(int)
-    onehot_to_label_dict = {numeric_tree_labels[i]: tree_labels[i] for i in range(len(tree_labels))}
-    rfe_metrics = []
-    for file in os.listdir(metrics_dir):
-        if "prediction_rfe" in file and capsel in file and growsel in file:
-            rfe_metrics.append(file)
-        else:
-            pass
-    if len(rfe_metrics) > 0:
-        rfe_metrics_path = main_utils.join_paths(metrics_dir, rfe_metrics[0])
-        combined_eliminated_metrics = load_metrics_from_path(rfe_metrics_path)
-        logging.debug("Loaded metrics of shape %s", combined_eliminated_metrics.shape)
-    else:
-        combined_eliminated_metrics = perform_recursive_feature_elimination_with_threshold_pred(capsel, growsel, combined_metrics, elimination_labels, metrics_dir, rfe_threshold)
-        logging.debug("Metrics shape after Recursive Feature Elimination: %s", combined_eliminated_metrics.shape)
-    X_pc = resampled_pointclouds
-    X_metrics = combined_eliminated_metrics
-    X_img_1 = images_frontal
-    X_img_2 = images_sideways
-    return X_pc, X_metrics, X_img_1, X_img_2, onehot_to_label_dict

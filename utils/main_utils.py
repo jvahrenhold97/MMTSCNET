@@ -39,7 +39,7 @@ def parse_arguments():
                         type=float, default=0.005)
     parser.add_argument('--ssstest',
                         help='Ratio for validation data. Range: [0.05 - 0.5]',
-                        type=float, default=0.3)
+                        type=float, default=0.25)
     parser.add_argument('--capsel',
                         help='[ALS | TLS | ULS | ALL] - Which capture method should be used for training.',
                         type=str, default="ULS")
