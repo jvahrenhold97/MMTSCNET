@@ -227,7 +227,7 @@ def perform_training(model, bsz, X_pc_train, X_img_1_train, X_img_2_train, X_met
     # Compilation of the tuned model with learning rate and training matrics
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=7.5e-6),
-        loss=model_utils.precision_recall_loss, #'categorical_crossentropy',
+        loss='categorical_crossentropy',
         metrics=['accuracy', tf.keras.metrics.Precision(name="precision"), tf.keras.metrics.Recall(name="recall"), tf.keras.metrics.AUC(name="pr_curve", curve="PR"), tf.keras.metrics.PrecisionAtRecall(0.85, name="pr_at_rec"), tf.keras.metrics.RecallAtPrecision(0.85, name="rec_at_pr")]
     )
     # Print model summary

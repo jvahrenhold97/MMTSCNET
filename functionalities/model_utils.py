@@ -30,31 +30,6 @@ from keras import mixed_precision
 policy = mixed_precision.Policy('mixed_float16')
 mixed_precision.set_global_policy(policy)
 
-def precision_recall_loss(y_true, y_pred, alpha=0.4):
-    """
-    Custom loss function that balances precision and recall.
-    Args:
-    y_true: Ground truth labels (one-hot encoded).
-    y_pred: Predicted probabilities for each class.
-    alpha: Weight for precision and recall (0.5 gives equal weight).
-    Returns:
-    Loss based on a weighted combination of precision and recall.
-    """
-    epsilon = K.epsilon()
-    # Convert predictions to binary values
-    y_pred = K.round(y_pred)
-    # Calculate true positives, false positives, false negatives
-    tp = K.sum(y_true * y_pred, axis=0)
-    fp = K.sum((1 - y_true) * y_pred, axis=0)
-    fn = K.sum(y_true * (1 - y_pred), axis=0)
-    # Calculate precision and recall
-    precision = tp / (tp + fp + epsilon)
-    recall = tp / (tp + fn + epsilon)
-    # Weighted combination of precision and recall
-    loss = alpha * (1 - precision) + (1 - alpha) * (1 - recall)
-    # Return the average loss across all classes
-    return K.mean(loss)
-
 def scheduler(epoch, lr):
     """
     Creation of the learning rate scheduler.
