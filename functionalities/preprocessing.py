@@ -651,7 +651,6 @@ def load_point_cloud(file_path):
     try:
         las_file = lp.read(file_path)
         points = np.vstack((las_file.x, las_file.y, las_file.z)).transpose()
-        logging.info("Successfully loaded point cloud %s", file_path)
     except OSError as e:
         logging.error("Error loading file %s: %s", file_path, e)
         raise
@@ -1384,8 +1383,8 @@ def filter_classes_by_representation(selected_pointclouds, threshold):
     label_counts = Counter(tree_labels)
     class_percentages = {label: count / total_samples * 100 for label, count in label_counts.items()}
     logging.info(f"Class percentages: {class_percentages}")
-    #valid_classes = ["FagSyl", "PicAbi", "PseMen", "QuePet"]
-    valid_classes = [label for label, percentage in class_percentages.items() if percentage >= threshold]
+    valid_classes = ["FagSyl", "PicAbi", "PseMen", "QuePet"]
+    #valid_classes = [label for label, percentage in class_percentages.items() if percentage >= threshold]
     filtered_pointclouds = [pc for pc in selected_pointclouds if pc.split("/")[-1].split(".")[0].split("_")[2] in valid_classes]
     return filtered_pointclouds
 
@@ -1539,7 +1538,26 @@ def generate_metrics_for_selected_pointclouds_fwf(selected_pointclouds, filtered
                      "equivalent_crown_diameter", "canopy_width_x", "canopy_width_y", "canopy_volume", "point_density", "lai", "canopy_closure", "crown_base_height", "std_dev_height",
                      "height_kurtosis", "height_skewness", "crown_area", "crown_perimeter", "crown_volume_to_height_ratio", "canopy_cover_fraction", "stem_volume", "canopy_base_height", "fwhm", "echo_width",
                      "surface_area", "surface_to_volume_ratio", "avg_nn_dist", "fract_dimension", "bb_dims", "crown_shape_indices"]
-    return combined_metrics, feature_names
+    df_metrics = pd.DataFrame(combined_metrics, columns=feature_names)
+    
+    # Compute the correlation matrix
+    correlation_matrix = df_metrics.corr().abs()  # Absolute correlation values
+    upper_triangle = correlation_matrix.where(np.triu(np.ones(correlation_matrix.shape), k=1).astype(bool))
+    
+    # Identify highly correlated features (threshold > 0.9)
+    highly_correlated_features = [column for column in upper_triangle.columns if any(upper_triangle[column] > 0.9)]
+
+    # Remove redundant features
+    df_metrics_reduced = df_metrics.drop(columns=highly_correlated_features)
+    selected_features = df_metrics_reduced.columns.tolist()
+
+    logging.info(f"Removed {len(highly_correlated_features)} redundant features due to high correlation.")
+    logging.info(f"Remaining features: {len(selected_features)}")
+
+    # Convert back to numpy array
+    combined_metrics = df_metrics_reduced.to_numpy()
+    
+    return combined_metrics, selected_features
 
 def generate_metrics_for_selected_pointclouds(selected_pointclouds, metrics_dir, capsel, growsel):
     """
@@ -1575,7 +1593,26 @@ def generate_metrics_for_selected_pointclouds(selected_pointclouds, metrics_dir,
                      "equivalent_crown_diameter", "canopy_width_x", "canopy_width_y", "canopy_volume", "point_density", "lai", "canopy_closure", "crown_base_height", "std_dev_height",
                      "height_kurtosis", "height_skewness", "crown_area", "crown_perimeter", "crown_volume_to_height_ratio", "canopy_cover_fraction", "stem_volume", "canopy_base_height",
                      "surface_area", "surface_to_volume_ratio", "avg_nn_dist", "fract_dimension", "bb_dims", "crown_shape_indices"]
-    return combined_metrics, feature_names
+    df_metrics = pd.DataFrame(combined_metrics, columns=feature_names)
+    
+    # Compute the correlation matrix
+    correlation_matrix = df_metrics.corr().abs()  # Absolute correlation values
+    upper_triangle = correlation_matrix.where(np.triu(np.ones(correlation_matrix.shape), k=1).astype(bool))
+    
+    # Identify highly correlated features (threshold > 0.9)
+    highly_correlated_features = [column for column in upper_triangle.columns if any(upper_triangle[column] > 0.9)]
+
+    # Remove redundant features
+    df_metrics_reduced = df_metrics.drop(columns=highly_correlated_features)
+    selected_features = df_metrics_reduced.columns.tolist()
+
+    logging.info(f"Removed {len(highly_correlated_features)} redundant features due to high correlation.")
+    logging.info(f"Remaining features: {len(selected_features)}")
+
+    # Convert back to numpy array
+    combined_metrics = df_metrics_reduced.to_numpy()
+    
+    return combined_metrics, selected_features
 
 def load_metrics_from_path(metrics_path):
     """
@@ -1993,8 +2030,8 @@ def generate_training_data(capsel, growsel, filtered_pointclouds, resampled_poin
         combined_eliminated_metrics = load_metrics_from_path(rfe_metrics_path)
         logging.debug("Loaded metrics of shape %s", combined_eliminated_metrics.shape)
     else:
-        #combined_eliminated_metrics = perform_recursive_feature_elimination_with_threshold(capsel, growsel, combined_metrics, elimination_labels, metrics_dir, rfe_threshold, feature_names)
-        combined_eliminated_metrics, features = perform_statistical_rfe(capsel, growsel, combined_metrics, elimination_labels, metrics_dir, feature_names, p_value_threshold=0.05)
+        combined_eliminated_metrics = perform_recursive_feature_elimination_with_threshold(capsel, growsel, combined_metrics, elimination_labels, metrics_dir, rfe_threshold, feature_names)
+        #combined_eliminated_metrics, features = perform_statistical_rfe(capsel, growsel, combined_metrics, elimination_labels, metrics_dir, feature_names, p_value_threshold=0.05)
         logging.debug("Metrics shape after Recursive Feature Elimination: %s", combined_eliminated_metrics.shape)
     logging.debug("Tree species to train on: %s", np.unique(tree_labels))
     logging.info("One-Hot encoding labels!")

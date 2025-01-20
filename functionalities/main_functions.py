@@ -7,8 +7,6 @@ import gc
 import time
 from keras_tuner import BayesianOptimization, Objective
 from keras.callbacks import ReduceLROnPlateau, LearningRateScheduler
-from keras import backend as K
-from sklearn.metrics import accuracy_score
 
 def extract_data(data_dir, work_dir, fwf_av, capsel, growsel):
     """
@@ -68,6 +66,8 @@ def preprocess_data(full_pathlist, ssstest, capsel, growsel, elimper, maxpcscale
     if fwf_av == True:
         unaugmented_regular_pointclouds = preprocessing.select_pointclouds(full_pathlist[6])
         unaugmented_fwf_pointclouds = preprocessing.select_pointclouds(full_pathlist[7])
+
+        logging.info(f"{full_pathlist[6], full_pathlist[7], len(unaugmented_fwf_pointclouds), len(unaugmented_regular_pointclouds)}")
         preprocessing.augment_selection_fwf(unaugmented_regular_pointclouds, unaugmented_fwf_pointclouds, elimper, maxpcscale, full_pathlist[6], full_pathlist[7], netpcsize, capsel)
         preprocessing.generate_colored_images(netimgsize, full_pathlist[6], full_pathlist[8])
         selected_pointclouds_augmented, selected_fwf_pointclouds_augmented, selected_images_augmented = preprocessing.get_user_specified_data_fwf(full_pathlist[6], full_pathlist[7], full_pathlist[8], capsel, growsel)
@@ -188,14 +188,16 @@ def perform_hp_tuning(model_dir, X_pc_train, X_img_1_train, X_img_2_train, X_met
                 callbacks=[reduce_lr, degrade_lr, macro_f1_callback, custom_scoring_callback])
     # Retrieve best hyperparameter configuration of the tuning process
     best_hyperparameters = tuner.get_best_hyperparameters(num_trials=1)[0]
+    optimal_learning_rate = best_hyperparameters.get('learning_rate')
+    print(f"Optimal Learning Rate: {optimal_learning_rate}")
     # Create instance of MMTSCNet with optimal hyperparameters
     combined_model = model_utils.CombinedModel(point_cloud_shape, image_shape, metrics_shape, num_classes, netpcsize)
     untrained_model = combined_model.get_untrained_model(best_hyperparameters)
     untrained_model.summary()
     gc.collect()
-    return untrained_model
+    return untrained_model, optimal_learning_rate
 
-def perform_training(model, bsz, X_pc_train, X_img_1_train, X_img_2_train, X_metrics_train, y_train, X_pc_val, X_img_1_val, X_img_2_val, X_metrics_val, y_val, modeldir, label_dict, capsel, growsel, netpcsize, fwf_av):
+def perform_training(model, bsz, X_pc_train, X_img_1_train, X_img_2_train, X_metrics_train, y_train, X_pc_val, X_img_1_val, X_img_2_val, X_metrics_val, y_val, modeldir, label_dict, capsel, growsel, netpcsize, fwf_av, optimal_learning_rate):
     """
     Main utility function for the training process.
 
@@ -226,7 +228,7 @@ def perform_training(model, bsz, X_pc_train, X_img_1_train, X_img_2_train, X_met
     tf.keras.utils.set_random_seed(812)
     # Compilation of the tuned model with learning rate and training matrics
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=7.5e-6),
+        optimizer=tf.keras.optimizers.Adam(learning_rate=optimal_learning_rate, clipnorm=1.0),
         loss='categorical_crossentropy',
         metrics=['accuracy', tf.keras.metrics.Precision(name="precision"), tf.keras.metrics.Recall(name="recall"), tf.keras.metrics.AUC(name="pr_curve", curve="PR"), tf.keras.metrics.PrecisionAtRecall(0.85, name="pr_at_rec"), tf.keras.metrics.RecallAtPrecision(0.85, name="rec_at_pr")]
     )
