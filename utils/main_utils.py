@@ -39,7 +39,7 @@ def parse_arguments():
                         type=float, default=0.005)
     parser.add_argument('--ssstest',
                         help='Ratio for validation data. Range: [0.05 - 0.5]',
-                        type=float, default=0.25)
+                        type=float, default=0.20)
     parser.add_argument('--capsel',
                         help='[ALS | TLS | ULS | ALL] - Which capture method should be used for training.',
                         type=str, default="ULS")
@@ -154,45 +154,6 @@ def join_paths(path, folder_name):
     """
     full_path = os.path.join(path + "/" + folder_name)
     return full_path
-
-def check_if_model_is_created(modeldir):
-    """
-    Checks for the presence of a previously trained instance of MMTSCNet.
-
-    Args:
-    modeldir: Directory containing models.
-
-    Returns:
-    True/False
-    """
-    files_list =  []
-    for file in os.listdir(modeldir):
-        if "TRAINED" in file:
-            files_list.append(file)
-        else:
-            pass
-    if len(files_list)>0:
-        return True
-    else:
-        return False
-    
-def copy_las_file_with_laspy(src, dest):
-    """
-    Copies a .las or .laz file with all existing data (including VLRs).
-
-    Args:
-    src: Source file path.
-    dest: Destination file path.
-    """
-    with lp.open(src) as src_las:
-        header = src_las.header
-        points = src_las.points
-        vlrs = src_las.header.vlrs
-        evlrs = src_las.header.evlrs
-    with lp.open(dest, mode='w', header=header) as dest_las:
-        dest_las.points = points
-        dest_las.header.vlrs.extend(vlrs)
-        dest_las.header.evlrs.extend(evlrs)
 
 def contains_full_waveform_data(las_file_path):
     """

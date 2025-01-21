@@ -23,21 +23,33 @@ def create_config_directory(local_pathlist, capsel, growsel, fwf_av):
     """
     if fwf_av == True:
         config_dir = local_pathlist[4]
-        local_dir = os.path.join(config_dir + "/DATA_" + capsel + "_" + growsel)
+        local_dir = os.path.join(config_dir + "/DATA_" + capsel + "_" + growsel + "_FWF")
         local_las_dir = main_utils.join_paths(local_dir, "LAS")
         local_fwf_dir = main_utils.join_paths(local_dir, "FWF")
         local_img_dir = main_utils.join_paths(local_dir, "IMG")
         local_met_dir = main_utils.join_paths(local_dir, "MET")
+        local_las_dir_p = main_utils.join_paths(local_dir, "LAS_P")
+        local_fwf_dir_p = main_utils.join_paths(local_dir, "FWF_P")
+        local_img_dir_p = main_utils.join_paths(local_dir, "IMG_P")
+        local_met_dir_p = main_utils.join_paths(local_dir, "MET_P")
         create_working_folder(local_dir)
         create_working_folder(local_las_dir)
         create_working_folder(local_fwf_dir)
         create_working_folder(local_img_dir)
         create_working_folder(local_met_dir)
+        create_working_folder(local_las_dir_p)
+        create_working_folder(local_fwf_dir_p)
+        create_working_folder(local_img_dir_p)
+        create_working_folder(local_met_dir_p)
         local_pathlist.append(local_dir)
         local_pathlist.append(local_las_dir)
         local_pathlist.append(local_fwf_dir)
         local_pathlist.append(local_img_dir)
         local_pathlist.append(local_met_dir)
+        local_pathlist.append(local_las_dir_p)
+        local_pathlist.append(local_fwf_dir_p)
+        local_pathlist.append(local_img_dir_p)
+        local_pathlist.append(local_met_dir_p)
         return local_pathlist
     else:
         config_dir = local_pathlist[2]
@@ -45,14 +57,23 @@ def create_config_directory(local_pathlist, capsel, growsel, fwf_av):
         local_las_dir = main_utils.join_paths(local_dir, "LAS")
         local_img_dir = main_utils.join_paths(local_dir, "IMG")
         local_met_dir = main_utils.join_paths(local_dir, "MET")
+        local_las_dir_p = main_utils.join_paths(local_dir, "LAS_P")
+        local_img_dir_p = main_utils.join_paths(local_dir, "IMG_P")
+        local_met_dir_p = main_utils.join_paths(local_dir, "MET_P")
         create_working_folder(local_dir)
         create_working_folder(local_las_dir)
         create_working_folder(local_img_dir)
         create_working_folder(local_met_dir)
+        create_working_folder(local_las_dir_p)
+        create_working_folder(local_img_dir_p)
+        create_working_folder(local_met_dir_p)
         local_pathlist.append(local_dir)
         local_pathlist.append(local_las_dir)
         local_pathlist.append(local_img_dir)
         local_pathlist.append(local_met_dir)
+        local_pathlist.append(local_las_dir_p)
+        local_pathlist.append(local_img_dir_p)
+        local_pathlist.append(local_met_dir_p)
         return local_pathlist
 
 def create_working_directory(workdir_path, fwf_av):
@@ -105,40 +126,6 @@ def create_working_folder(path):
         os.makedirs(path)
     else:
         logging.debug("Folder @ %s already exists!", path)
-
-def get_is_dataset_extracted(las_unzipped_path):
-    """
-    Check if dataset has been extracted already.
-
-    Args:
-    las_unzipped_path: Filepath to unzipped las files.
-
-    Returns:
-    True/False
-    """
-    extracted_datasets_count = 0
-    for subdir in os.listdir(las_unzipped_path):
-        extracted_datasets_count+=1
-    if extracted_datasets_count > 0:
-        return True
-    else:
-        return False
-    
-def get_las_and_fwf_base_dir_paths(data_source_path):
-    """
-    Retrieves filepaths to zipped las and FWF folders.
-
-    Args:
-    data_source_path: Filepath to source data.
-
-    Returns:
-    las_fwf_base_dir_paths: Paths to zipped las and fwf folders.
-    """
-    las_fwf_base_dir_paths = []
-    for subdir in os.listdir(data_source_path):
-        subdir_path = main_utils.join_paths(data_source_path, subdir)
-        las_fwf_base_dir_paths.append(subdir_path)
-    return las_fwf_base_dir_paths
 
 def unzip_all_datasets(SOURCE_DATASET_PATH, pathlist, fwf_av):
     """
@@ -203,91 +190,39 @@ def unzip_all_datasets(SOURCE_DATASET_PATH, pathlist, fwf_av):
         else:
             logging.warning("Already extracted dataset found, skipping!")
 
-def get_are_fwf_pcs_extracted(fwf_working_path):
+def get_is_dataset_extracted(las_unzipped_path):
     """
-    Checks if the individual FWF flight strips have already been extracted.
+    Check if dataset has been extracted already.
 
     Args:
-    fwf_working_path: Filepath to extracted FWF flight strips in the working directory.
+    las_unzipped_path: Filepath to unzipped las files.
 
     Returns:
     True/False
     """
-    index=0
-    for file in os.listdir(fwf_working_path):
-        index+=1
-    if index > 0:
+    extracted_datasets_count = 0
+    for subdir in os.listdir(las_unzipped_path):
+        extracted_datasets_count+=1
+    if extracted_datasets_count > 0:
         return True
-    else: 
+    else:
         return False
-
-def getDimensions(file):
+    
+def get_las_and_fwf_base_dir_paths(data_source_path):
     """
-    Retrieves the dimensions of a las file.
+    Retrieves filepaths to zipped las and FWF folders.
 
     Args:
-    file: Las file.
+    data_source_path: Filepath to source data.
 
     Returns:
-    dimensions: Dimensions of the specified las file.
+    las_fwf_base_dir_paths: Paths to zipped las and fwf folders.
     """
-    dimensions = ""
-    for dim in file.point_format:
-        dimensions += " " + dim.name
-    return dimensions
-
-def readLas(file):
-    """
-    Reads a las file and returns its points and dimensions.
-
-    Args:
-    file: Las file.
-
-    Returns:
-    source_cloud: Points included in the las file.
-    dimensions: Dimensions of the specified las file.
-    """
-    dimensions = getDimensions(file)
-    source_cloud = np.array([file.x, file.y, file.z]).T
-    return source_cloud, dimensions
-
-def append_to_las(in_laz, out_las):
-    """
-    Attaches one las file to another las file with the VLRs included.
-
-    Args:
-    in_laz: Filepath to the las file to attach.
-    out_las: Filepath to the target las file.
-    """
-    with lp.open(out_las, mode='a') as outlas:
-        with lp.open(in_laz) as inlas:
-            if contains_full_waveform_data(in_laz) and not contains_full_waveform_data(out_las):
-                for vlr in inlas.header.vlrs:
-                    outlas.header.vlrs.append(vlr)
-                for evlr in inlas.header.evlrs:
-                    outlas.header.evlrs.append(evlr)
-            for points in inlas.chunk_iterator(2_000_000):
-                outlas.append_points(points)
-
-def contains_full_waveform_data(las_file_path):
-    """
-    Checks a file for the presence of FWF data.
-
-    Args:
-    las_file_path: File to check for FWF data.
-
-    Returns:
-    True/False
-    """
-    try:
-        las = lp.read(las_file_path)
-        for vlr in las.header.vlrs:
-            if 99 < vlr.record_id < 355:
-                return True
-        return False
-    except Exception as e:
-        logging.error(f"Error reading LAS file: {e}")
-        return False
+    las_fwf_base_dir_paths = []
+    for subdir in os.listdir(data_source_path):
+        subdir_path = main_utils.join_paths(data_source_path, subdir)
+        las_fwf_base_dir_paths.append(subdir_path)
+    return las_fwf_base_dir_paths
 
 def create_fpcs(fwf_unzipped_path, fpc_unzipped_path):
     """
@@ -339,86 +274,62 @@ def create_fpcs(fwf_unzipped_path, fpc_unzipped_path):
     else:
         logging.warning("FPCs appear to have already been created!")
 
-def get_capgrow(capsel, growsel):
+def get_are_fwf_pcs_extracted(fwf_working_path):
     """
-    Utility for validating acquisition and leaf-condition combinations.
+    Checks if the individual FWF flight strips have already been extracted.
 
     Args:
-    capsel: User-specified acquisition selection.
-    growsel: User-specified leaf-confition selection.
+    fwf_working_path: Filepath to extracted FWF flight strips in the working directory.
 
     Returns:
-    cap1: Acquisition method 1.
-    cap2: Acquisition method 2.
-    cap3: Acquisition method 3.
-    grow1: Leaf-condition 1.
-    grow2: Leaf-condition 2.
+    True/False
     """
-    if capsel == "ALL":
-        cap1 = "ALS"
-        cap2 = "TLS"
-        cap3 = "ULS"
-        if growsel == "LEAF-ON":
-            grow1 = "on"
-            grow2 = "on"
-            return cap1, cap2, cap3, grow1, grow2
-        elif growsel == "LEAF-OFF":
-            grow1 = "off"
-            grow2 = "off"
-            return cap1, cap2, cap3, grow1, grow2
-        else:
-            grow1 = "on"
-            grow2 = "off"
-            return cap1, cap2, cap3, grow1, grow2
-    elif capsel == "ALS":
-        cap1 = "ALS"
-        cap2 = "ALS"
-        cap3 = "ALS"
-        if growsel == "LEAF-ON":
-            grow1 = "on"
-            grow2 = "on"
-            return cap1, cap2, cap3, grow1, grow2
-        elif growsel == "LEAF-OFF":
-            grow1 = "off"
-            grow2 = "off"
-            return cap1, cap2, cap3, grow1, grow2
-        else:
-            grow1 = "on"
-            grow2 = "off"
-            return cap1, cap2, cap3, grow1, grow2
-    elif capsel == "ULS":
-        cap1 = "ULS"
-        cap2 = "ULS"
-        cap3 = "ULS"
-        if growsel == "LEAF-ON":
-            grow1 = "on"
-            grow2 = "on"
-            return cap1, cap2, cap3, grow1, grow2
-        elif growsel == "LEAF-OFF":
-            grow1 = "off"
-            grow2 = "off"
-            return cap1, cap2, cap3, grow1, grow2
-        else:
-            grow1 = "on"
-            grow2 = "off"
-            return cap1, cap2, cap3, grow1, grow2
-    else:
-        cap1 = "TLS"
-        cap2 = "TLS"
-        cap3 = "TLS"
-        if growsel == "LEAF-ON":
-            grow1 = "on"
-            grow2 = "on"
-            return cap1, cap2, cap3, grow1, grow2
-        elif growsel == "LEAF-OFF":
-            grow1 = "off"
-            grow2 = "off"
-            return cap1, cap2, cap3, grow1, grow2
-        else:
-            grow1 = "on"
-            grow2 = "off"
-            return cap1, cap2, cap3, grow1, grow2
+    index=0
+    for file in os.listdir(fwf_working_path):
+        index+=1
+    if index > 0:
+        return True
+    else: 
+        return False
+    
+def append_to_las(in_laz, out_las):
+    """
+    Attaches one las file to another las file with the VLRs included.
 
+    Args:
+    in_laz: Filepath to the las file to attach.
+    out_las: Filepath to the target las file.
+    """
+    with lp.open(out_las, mode='a') as outlas:
+        with lp.open(in_laz) as inlas:
+            if contains_full_waveform_data(in_laz) and not contains_full_waveform_data(out_las):
+                for vlr in inlas.header.vlrs:
+                    outlas.header.vlrs.append(vlr)
+                for evlr in inlas.header.evlrs:
+                    outlas.header.evlrs.append(evlr)
+            for points in inlas.chunk_iterator(2_000_000):
+                outlas.append_points(points)
+
+def contains_full_waveform_data(las_file_path):
+    """
+    Checks a file for the presence of FWF data.
+
+    Args:
+    las_file_path: File to check for FWF data.
+
+    Returns:
+    True/False
+    """
+    try:
+        las = lp.read(las_file_path)
+        for vlr in las.header.vlrs:
+            if 99 < vlr.record_id < 355:
+                return True
+        return False
+    except Exception as e:
+        logging.error(f"Error reading LAS file: {e}")
+        return False
+    
 def extract_single_trees_from_fpc(fpc_unzipped_path, las_unzipped_path, las_working_path, fwf_working_path, capsel, growsel):
     """
     Extraction of individual trees from FWF plot point clouds.
@@ -499,133 +410,116 @@ def extract_single_trees_from_fpc(fpc_unzipped_path, las_unzipped_path, las_work
     else:
         logging.warning("FWF single trees have already been extracted, skipping!")
 
-def extract_single_trees_from_fpc_for_predictions(fpc_unzipped_path, las_unzipped_path, las_working_path, fwf_working_path, capsel, growsel):
+def readLas(file):
     """
-    Extraction of individual trees from FWF plot point clouds for predicting.
+    Reads a las file and returns its points and dimensions.
 
     Args:
-    fpc_unzipped_path: Filepath to FWF plot point clouds.
-    las_unzipped_path: Filepath to extracted las point clouds.
-    las_working_path: Filepath to las point cloud target directory.
-    fwf_working_path: Filepath to fwf point cloud target directory.
-    capsel: User-specified acquisition selection.
-    growsel: User-specified leaf-confition selection.
-    """
-    cap1, cap2, cap3, grow1, grow2 = get_capgrow(capsel, growsel)
-    if get_are_fwf_pcs_extracted(fwf_working_path) == False:
-        id_counter = 0
-        tree_index = -1
-        for fpc in os.listdir(fpc_unzipped_path):
-            if fpc.lower().endswith(".las") or fpc.lower().endswith(".laz"):
-                fpc_file_path = main_utils.join_paths(fpc_unzipped_path, fpc)
-                fpc_name = fpc.split(".")[0]
-                inFile = lp.read(fpc_file_path)
-                logging.debug("Original FWF point format: %s", inFile.header.point_format)
-                fpc_source_cloud, fpc_header_text = readLas(inFile)
-                kd_tree = KDTree(fpc_source_cloud[:, :3], leafsize=64)
-                for plot in os.listdir(las_unzipped_path):
-                    if plot == fpc_name:
-                        plot_path = main_utils.join_paths(las_unzipped_path, plot)
-                        for plot_pc_folder in os.listdir(plot_path):
-                            if plot_pc_folder == "single_trees":
-                                single_trees_plot_pc_folder = main_utils.join_paths(plot_path, plot_pc_folder)
-                                for single_tree_pc_folder in os.listdir(single_trees_plot_pc_folder):
-                                    single_tree_pc_folder_path = main_utils.join_paths(single_trees_plot_pc_folder, single_tree_pc_folder)
-                                    tree_index+=1
-                                    for single_tree_pc in os.listdir(single_tree_pc_folder_path):
-                                        if single_tree_pc.lower().endswith(".laz") or single_tree_pc.lower().endswith(".las"):
-                                            if cap1 in single_tree_pc or cap2 in single_tree_pc or cap3 in single_tree_pc:
-                                                if grow1 in single_tree_pc or grow2 in single_tree_pc:
-                                                    single_tree_pc_path = main_utils.join_paths(single_tree_pc_folder_path, single_tree_pc)
-                                                    inFile_target = lp.read(single_tree_pc_path)
-                                                    target_cloud, header_txt_target = readLas(inFile_target)
-                                                    n_source = fpc_source_cloud.shape[0]
-                                                    dist, idx = kd_tree.query(target_cloud[:, :3], k=10, eps=0.0)
-                                                    idx = np.unique(idx)
-                                                    idx = idx[idx != n_source]
-                                                    exported_points = inFile.points[idx].copy()
-                                                    outFile = lp.LasData(inFile.header)
-                                                    outFile.vlrs = inFile.vlrs
-                                                    outFile.points = exported_points
-                                                    species = single_tree_pc.split("_")[0]
-                                                    retrieval = single_tree_pc.split("_")[3]
-                                                    method = single_tree_pc.split("_")[5].split(".")[0].split("-")[0]
-                                                    if "on" in single_tree_pc:
-                                                        output_path_fwf_pc = os.path.join(fwf_working_path + "/" + str(tree_index) + "_FWF_" + species + "_" + method + "_" + retrieval + "_" + str(id_counter) + "_" + growsel + "_" + plot + ".laz")
-                                                        output_path_las_pc = os.path.join(las_working_path + "/" + str(tree_index) + "_REG_" + species + "_" + method + "_" + retrieval + "_" + str(id_counter) + "_" + growsel + "_" + plot + ".laz")
-                                                        outFile.write(output_path_fwf_pc)
-                                                        shutil.copy2(single_tree_pc_path, output_path_las_pc)
-                                                        logging.info("Extracted tree #%s for plot %s with point format %s", id_counter, plot, outFile.header.point_format)
-                                                        id_counter+=1
-                                                        logging.debug("Does file contain fwf data? - %s", contains_full_waveform_data(output_path_fwf_pc))
-                                                    else:
-                                                        output_path_fwf_pc = os.path.join(fwf_working_path + "/" + str(tree_index) + "_FWF_" + species + "_" + method + "_" + retrieval + "_" + str(id_counter) + "_" + growsel + "_" + plot + ".laz")
-                                                        output_path_las_pc = os.path.join(las_working_path + "/" + str(tree_index) + "_REG_" + species + "_" + method + "_" + retrieval + "_" + str(id_counter) + "_" + growsel + "_" + plot + ".laz")
-                                                        outFile.write(output_path_fwf_pc)
-                                                        shutil.copy2(single_tree_pc_path, output_path_las_pc)
-                                                        logging.info("Extracted tree #%s for plot %s with point format %s", id_counter, plot, outFile.header.point_format)
-                                                        id_counter+=1
-                                                        logging.debug("Does file contain fwf data? - %s", contains_full_waveform_data(output_path_fwf_pc))
-                                                else:
-                                                    pass
-                            else:
-                                pass
-                    else:
-                        pass
-                else:
-                    pass
-            else:
-                pass
-    else:
-        logging.warning("FWF single trees have already been extracted, skipping!")
-
-def create_config_directory_for_predictions(local_pathlist, capsel, growsel, fwf_av):
-    """
-    Creates a temporary directory for MMTSCNet, dependent on the presence of FWF data.
-
-    Args:
-    local_pathlist: List of paths created for MMTSCNet.
-    capsel: User-specified acquisition method.
-    growsel: User-specified leaf condition.
-    fwf_av: True/False - Presence of FWF data.
+    file: Las file.
 
     Returns:
-    local_pathlist: List of usable paths for further steps in the preprocessing
+    source_cloud: Points included in the las file.
+    dimensions: Dimensions of the specified las file.
     """
-    if fwf_av == True:
-        config_dir = local_pathlist[4]
-        local_dir = os.path.join(config_dir + "/PREDICTIONS_" + capsel + "_" + growsel)
-        local_las_dir = main_utils.join_paths(local_dir, "LAS")
-        local_fwf_dir = main_utils.join_paths(local_dir, "FWF")
-        local_img_dir = main_utils.join_paths(local_dir, "IMG")
-        local_met_dir = main_utils.join_paths(local_dir, "MET")
-        create_working_folder(local_dir)
-        create_working_folder(local_las_dir)
-        create_working_folder(local_fwf_dir)
-        create_working_folder(local_img_dir)
-        create_working_folder(local_met_dir)
-        local_pathlist.append(local_dir)
-        local_pathlist.append(local_las_dir)
-        local_pathlist.append(local_fwf_dir)
-        local_pathlist.append(local_img_dir)
-        local_pathlist.append(local_met_dir)
-        return local_pathlist
+    dimensions = getDimensions(file)
+    source_cloud = np.array([file.x, file.y, file.z]).T
+    return source_cloud, dimensions
+
+def getDimensions(file):
+    """
+    Retrieves the dimensions of a las file.
+
+    Args:
+    file: Las file.
+
+    Returns:
+    dimensions: Dimensions of the specified las file.
+    """
+    dimensions = ""
+    for dim in file.point_format:
+        dimensions += " " + dim.name
+    return dimensions
+
+def get_capgrow(capsel, growsel):
+    """
+    Utility for validating acquisition and leaf-condition combinations.
+
+    Args:
+    capsel: User-specified acquisition selection.
+    growsel: User-specified leaf-confition selection.
+
+    Returns:
+    cap1: Acquisition method 1.
+    cap2: Acquisition method 2.
+    cap3: Acquisition method 3.
+    grow1: Leaf-condition 1.
+    grow2: Leaf-condition 2.
+    """
+    if capsel == "ALL":
+        cap1 = "ALS"
+        cap2 = "TLS"
+        cap3 = "ULS"
+        if growsel == "LEAF-ON":
+            grow1 = "on"
+            grow2 = "on"
+            return cap1, cap2, cap3, grow1, grow2
+        elif growsel == "LEAF-OFF":
+            grow1 = "off"
+            grow2 = "off"
+            return cap1, cap2, cap3, grow1, grow2
+        else:
+            grow1 = "on"
+            grow2 = "off"
+            return cap1, cap2, cap3, grow1, grow2
+    elif capsel == "ALS":
+        cap1 = "ALS"
+        cap2 = "ALS"
+        cap3 = "ALS"
+        if growsel == "LEAF-ON":
+            grow1 = "on"
+            grow2 = "on"
+            return cap1, cap2, cap3, grow1, grow2
+        elif growsel == "LEAF-OFF":
+            grow1 = "off"
+            grow2 = "off"
+            return cap1, cap2, cap3, grow1, grow2
+        else:
+            grow1 = "on"
+            grow2 = "off"
+            return cap1, cap2, cap3, grow1, grow2
+    elif capsel == "ULS":
+        cap1 = "ULS"
+        cap2 = "ULS"
+        cap3 = "ULS"
+        if growsel == "LEAF-ON":
+            grow1 = "on"
+            grow2 = "on"
+            return cap1, cap2, cap3, grow1, grow2
+        elif growsel == "LEAF-OFF":
+            grow1 = "off"
+            grow2 = "off"
+            return cap1, cap2, cap3, grow1, grow2
+        else:
+            grow1 = "on"
+            grow2 = "off"
+            return cap1, cap2, cap3, grow1, grow2
     else:
-        config_dir = local_pathlist[2]
-        local_dir = os.path.join(config_dir + "/PREDICTIONS_" + capsel + "_" + growsel)
-        local_las_dir = main_utils.join_paths(local_dir, "LAS")
-        local_img_dir = main_utils.join_paths(local_dir, "IMG")
-        local_met_dir = main_utils.join_paths(local_dir, "MET")
-        create_working_folder(local_dir)
-        create_working_folder(local_las_dir)
-        create_working_folder(local_img_dir)
-        create_working_folder(local_met_dir)
-        local_pathlist.append(local_dir)
-        local_pathlist.append(local_las_dir)
-        local_pathlist.append(local_img_dir)
-        local_pathlist.append(local_met_dir)
-        return local_pathlist
-    
+        cap1 = "TLS"
+        cap2 = "TLS"
+        cap3 = "TLS"
+        if growsel == "LEAF-ON":
+            grow1 = "on"
+            grow2 = "on"
+            return cap1, cap2, cap3, grow1, grow2
+        elif growsel == "LEAF-OFF":
+            grow1 = "off"
+            grow2 = "off"
+            return cap1, cap2, cap3, grow1, grow2
+        else:
+            grow1 = "on"
+            grow2 = "off"
+            return cap1, cap2, cap3, grow1, grow2
+        
 def copy_files_for_prediction(las_unzipped_path, las_working_path, capsel, growsel):
     """
     Copies las point clouds to the working directory for predictions.

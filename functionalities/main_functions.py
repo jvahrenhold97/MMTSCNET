@@ -33,7 +33,7 @@ def extract_data(data_dir, work_dir, fwf_av, capsel, growsel):
         full_pathlist = workspace_setup.create_config_directory(local_pathlist, capsel, growsel, fwf_av)
         workspace_setup.copy_files_for_prediction(full_pathlist[1], full_pathlist[4], capsel, growsel)
         return full_pathlist
-
+    
 def preprocess_data(full_pathlist, ssstest, capsel, growsel, elimper, maxpcscale, netpcsize, netimgsize, fwf_av):
     """
     Main utility function for the preprocessing.
@@ -64,41 +64,104 @@ def preprocess_data(full_pathlist, ssstest, capsel, growsel, elimper, maxpcscale
     label_dict: Dictionary to translate one-hot encoded labels to textual labels.
     """
     if fwf_av == True:
+        logging.info("Creating Test-Set and removing underrepresented species...")
+        if workspace_setup.get_are_fwf_pcs_extracted(full_pathlist[6]) == False:
+            species_distribution = preprocessing.eliminate_unused_species_fwf(full_pathlist[6], full_pathlist[7], elimper)
+            preprocessing.move_pointclouds_to_preds_fwf(full_pathlist[6], full_pathlist[7], full_pathlist[10], full_pathlist[11])
+        else:
+            pointclouds = []
+            for file in os.listdir(full_pathlist[6]):
+                pointclouds.append(file)
+            species_list = preprocessing.get_species_distribution(pointclouds)
+            species_to_use, species_distribution = preprocessing.eliminate_underrepresented_species(species_list, 0.0)
+
+        logging.info("Gathering point clouds...")
         unaugmented_regular_pointclouds = preprocessing.select_pointclouds(full_pathlist[6])
         unaugmented_fwf_pointclouds = preprocessing.select_pointclouds(full_pathlist[7])
+        unaugmented_regular_pred_pointclouds = preprocessing.select_pointclouds(full_pathlist[10])
+        unaugmented_fwf_pred_pointclouds = preprocessing.select_pointclouds(full_pathlist[11])
 
-        logging.info(f"{full_pathlist[6], full_pathlist[7], len(unaugmented_fwf_pointclouds), len(unaugmented_regular_pointclouds)}")
-        preprocessing.augment_selection_fwf(unaugmented_regular_pointclouds, unaugmented_fwf_pointclouds, elimper, maxpcscale, full_pathlist[6], full_pathlist[7], netpcsize, capsel)
+        logging.info("Augmenting point clouds...")
+        preprocessing.augment_selection_fwf(unaugmented_regular_pointclouds, unaugmented_fwf_pointclouds, maxpcscale, full_pathlist[6], full_pathlist[7], species_distribution)
+        preprocessing.augment_selection_fwf(unaugmented_regular_pred_pointclouds, unaugmented_fwf_pred_pointclouds, maxpcscale, full_pathlist[10], full_pathlist[11], species_distribution)
+        
+        logging.info("Generating images...")
         preprocessing.generate_colored_images(netimgsize, full_pathlist[6], full_pathlist[8])
+        preprocessing.generate_colored_images(netimgsize, full_pathlist[10], full_pathlist[12])
+
+        logging.info("Resampling point clouds using FPS...")
         selected_pointclouds_augmented, selected_fwf_pointclouds_augmented, selected_images_augmented = preprocessing.get_user_specified_data_fwf(full_pathlist[6], full_pathlist[7], full_pathlist[8], capsel, growsel)
-        filtered_pointclouds, filtered_fwf_pointclouds, filtered_images = preprocessing.filter_data_for_selection_fwf(selected_pointclouds_augmented, selected_fwf_pointclouds_augmented, selected_images_augmented, elimper)
-        logging.info("Resampling point clouds...")
-        pointclouds_for_resampling = [preprocessing.load_point_cloud(file) for file in filtered_pointclouds]
+        selected_pointclouds_pred_augmented, selected_fwf_pointclouds_pred_augmented, selected_images_pred_augmented = preprocessing.get_user_specified_data_fwf(full_pathlist[10], full_pathlist[11], full_pathlist[12], capsel, growsel)
+        pointclouds_for_resampling = [preprocessing.load_point_cloud(file) for file in selected_pointclouds_augmented]
         centered_points = preprocessing.center_point_cloud(pointclouds_for_resampling)
         resampled_pointclouds = np.array([preprocessing.resample_pointcloud(centered_points, netpcsize, i) for i in range(len(centered_points))])
+        pointclouds_pred_for_resampling = [preprocessing.load_point_cloud(file_pred) for file_pred in selected_pointclouds_pred_augmented]
+        centered_points_pred = preprocessing.center_point_cloud(pointclouds_pred_for_resampling)
+        resampled_pointclouds_pred = np.array([preprocessing.resample_pointcloud(centered_points_pred, netpcsize, i) for i in range(len(centered_points_pred))])
+
         logging.info("Generating metrics for point clouds...")
-        combined_metrics_all, feature_names = preprocessing.generate_metrics_for_selected_pointclouds_fwf(filtered_pointclouds, filtered_fwf_pointclouds, full_pathlist[9], capsel, growsel)
-        images_frontal, images_sideways = preprocessing.match_images_with_pointclouds(filtered_pointclouds, filtered_images)
+        combined_metrics_all, feature_names, eliminated_features = preprocessing.generate_metrics_for_selected_pointclouds_fwf(selected_pointclouds_augmented, selected_fwf_pointclouds_augmented, full_pathlist[9], capsel, growsel, [])
+        combined_metrics_all_pred, feature_names_pred, elim_features = preprocessing.generate_metrics_for_selected_pointclouds_fwf(selected_pointclouds_pred_augmented, selected_fwf_pointclouds_pred_augmented, full_pathlist[13], capsel, growsel, eliminated_features)
+        
+        logging.info("Collecting image data...")
+        images_frontal, images_sideways = preprocessing.match_images_with_pointclouds(selected_pointclouds_augmented, selected_images_augmented)
+        images_frontal_pred, images_sideways_pred = preprocessing.match_images_with_pointclouds(selected_pointclouds_pred_augmented, selected_images_pred_augmented)
         images_front = np.asarray(images_frontal)
         images_side = np.asarray(images_sideways)
-        X_pc_train, X_pc_val, X_pc_pred, X_metrics_train, X_metrics_val, X_metrics_pred, X_img_1_train, X_img_1_val, X_img_1_pred, X_img_2_train, X_img_2_val, X_img_2_pred, y_train, y_val, y_pred, num_classes, label_dict = preprocessing.generate_training_data(capsel, growsel, filtered_pointclouds, resampled_pointclouds, combined_metrics_all, images_front, images_side, ssstest, full_pathlist[9], 0.008, feature_names)
+        images_front_pred = np.asarray(images_frontal_pred)
+        images_side_pred = np.asarray(images_sideways_pred)
+
+        logging.info("Creating final Training-, Validation- and Test-Set...")
+        X_pc_train, X_pc_val, X_pc_pred, X_metrics_train, X_metrics_val, X_metrics_pred, X_img_1_train, X_img_1_val, X_img_1_pred, X_img_2_train, X_img_2_val, X_img_2_pred, y_train, y_val, y_pred, num_classes, label_dict = preprocessing.generate_training_data(capsel, growsel, selected_pointclouds_augmented, resampled_pointclouds, selected_pointclouds_pred_augmented, resampled_pointclouds_pred, combined_metrics_all, combined_metrics_all_pred, images_front, images_side, images_front_pred, images_side_pred, ssstest, full_pathlist[9], full_pathlist[13], 0.008, feature_names)
         return X_pc_train, X_pc_val, X_pc_pred, X_metrics_train, X_metrics_val, X_metrics_pred, X_img_1_train, X_img_1_val, X_img_1_pred, X_img_2_train, X_img_2_val, X_img_2_pred, y_train, y_val, y_pred, num_classes, label_dict
     else:
+        logging.info("Creating Test-Set and removing underrepresented species...")
+        if workspace_setup.get_are_fwf_pcs_extracted(full_pathlist[4]) == False:
+            species_distribution = preprocessing.eliminate_unused_species(full_pathlist[4], elimper)
+            preprocessing.move_pointclouds_to_preds(full_pathlist[4], full_pathlist[7])
+        else:
+            pointclouds = []
+            for file in os.listdir(full_pathlist[4]):
+                pointclouds.append(file)
+            species_list = preprocessing.get_species_distribution(pointclouds)
+            species_to_use, species_distribution = preprocessing.eliminate_underrepresented_species(species_list, 0.0)
+
+        logging.info("Gathering point clouds...")
         unaugmented_regular_pointclouds = preprocessing.select_pointclouds(full_pathlist[4])
-        preprocessing.augment_selection(unaugmented_regular_pointclouds, elimper, maxpcscale, full_pathlist[4], netpcsize, capsel)
+        unaugmented_regular_pred_pointclouds = preprocessing.select_pointclouds(full_pathlist[7])
+
+        logging.info("Augmenting point clouds...")
+        preprocessing.augment_selection(unaugmented_regular_pointclouds, maxpcscale, full_pathlist[4], species_distribution)
+        preprocessing.augment_selection(unaugmented_regular_pred_pointclouds, maxpcscale, full_pathlist[7], species_distribution)
+
+        logging.info("Generating images...")
         preprocessing.generate_colored_images(netimgsize, full_pathlist[4], full_pathlist[5])
+        preprocessing.generate_colored_images(netimgsize, full_pathlist[7], full_pathlist[8])
+
+        logging.info("Resampling point clouds using FPS...")
         selected_pointclouds_augmented, selected_images_augmented = preprocessing.get_user_specified_data(full_pathlist[4], full_pathlist[5], capsel, growsel)
-        filtered_pointclouds, filtered_images = preprocessing.filter_data_for_selection(selected_pointclouds_augmented, selected_images_augmented, elimper)
-        logging.info("Resampling point clouds...")
-        pointclouds_for_resampling = [preprocessing.load_point_cloud(file) for file in filtered_pointclouds]
+        selected_pointclouds_pred_augmented, selected_images_pred_augmented = preprocessing.get_user_specified_data(full_pathlist[7], full_pathlist[8], capsel, growsel)
+        pointclouds_for_resampling = [preprocessing.load_point_cloud(file) for file in selected_pointclouds_augmented]
         centered_points = preprocessing.center_point_cloud(pointclouds_for_resampling)
         resampled_pointclouds = np.array([preprocessing.resample_pointcloud(centered_points, netpcsize, i) for i in range(len(centered_points))])
+        pointclouds_pred_for_resampling = [preprocessing.load_point_cloud(file_pred) for file_pred in selected_pointclouds_pred_augmented]
+        centered_points_pred = preprocessing.center_point_cloud(pointclouds_pred_for_resampling)
+        resampled_pointclouds_pred = np.array([preprocessing.resample_pointcloud(centered_points_pred, netpcsize, i) for i in range(len(centered_points_pred))])
+
         logging.info("Generating metrics for point clouds...")
-        combined_metrics_all, feature_names = preprocessing.generate_metrics_for_selected_pointclouds(filtered_pointclouds, full_pathlist[6], capsel, growsel)
-        images_frontal, images_sideways = preprocessing.match_images_with_pointclouds(filtered_pointclouds, filtered_images)
+        combined_metrics_all, feature_names, eliminated_features = preprocessing.generate_metrics_for_selected_pointclouds(selected_pointclouds_augmented, full_pathlist[6], capsel, growsel, [])
+        combined_metrics_all_pred, feature_names_pred, elim_features_pred = preprocessing.generate_metrics_for_selected_pointclouds(selected_pointclouds_pred_augmented, full_pathlist[9], capsel, growsel, eliminated_features)
+
+        logging.info("Collecting image data...")
+        images_frontal, images_sideways = preprocessing.match_images_with_pointclouds(selected_pointclouds_augmented, selected_images_augmented)
+        images_frontal_pred, images_sideways_pred = preprocessing.match_images_with_pointclouds(selected_pointclouds_pred_augmented, selected_images_pred_augmented)
         images_front = np.asarray(images_frontal)
         images_side = np.asarray(images_sideways)
-        X_pc_train, X_pc_val, X_pc_pred, X_metrics_train, X_metrics_val, X_metrics_pred, X_img_1_train, X_img_1_val, X_img_1_pred, X_img_2_train, X_img_2_val, X_img_2_pred, y_train, y_val, y_pred, num_classes, label_dict = preprocessing.generate_training_data(capsel, growsel, filtered_pointclouds, resampled_pointclouds, combined_metrics_all, images_front, images_side, ssstest, full_pathlist[6], 0.008, feature_names)
+        images_front_pred = np.asarray(images_frontal_pred)
+        images_side_pred = np.asarray(images_sideways_pred)
+
+        logging.info("Creating final Training-, Validation- and Test-Set...")
+        X_pc_train, X_pc_val, X_pc_pred, X_metrics_train, X_metrics_val, X_metrics_pred, X_img_1_train, X_img_1_val, X_img_1_pred, X_img_2_train, X_img_2_val, X_img_2_pred, y_train, y_val, y_pred, num_classes, label_dict = preprocessing.generate_training_data(capsel, growsel, selected_pointclouds_augmented, resampled_pointclouds, selected_pointclouds_pred_augmented, resampled_pointclouds_pred, combined_metrics_all, combined_metrics_all_pred, images_front, images_side, images_front_pred, images_side_pred, ssstest, full_pathlist[6], full_pathlist[9], 0.008, feature_names)
         return X_pc_train, X_pc_val, X_pc_pred, X_metrics_train, X_metrics_val, X_metrics_pred, X_img_1_train, X_img_1_val, X_img_1_pred, X_img_2_train, X_img_2_val, X_img_2_pred, y_train, y_val, y_pred, num_classes, label_dict
     
 def perform_hp_tuning(model_dir, X_pc_train, X_img_1_train, X_img_2_train, X_metrics_train, y_train, X_pc_val, X_img_1_val, X_img_2_val, X_metrics_val, y_val, bsize, netpcsize, netimgsize, num_classes, capsel, growsel, fwf_av):
