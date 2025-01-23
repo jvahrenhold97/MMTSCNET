@@ -41,7 +41,7 @@ def eliminate_unused_species_fwf(reg_pc_folder, fwf_pc_folder, elimination_perce
     for fpc in os.listdir(fwf_pc_folder):
         if fpc.endswith(".laz"):
             species = extract_species(fpc)
-            fpc_path = os.path.join(reg_pc_folder, fpc)
+            fpc_path = os.path.join(fwf_pc_folder, fpc)
             fpc_points = load_point_cloud(fpc_path)
             if species in species_to_use and len(fpc_points) > netpcsize/2:
                 base_name = fpc.replace("_FWF_", "_")
