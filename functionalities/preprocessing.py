@@ -20,7 +20,7 @@ from functionalities import workspace_setup
 from collections import defaultdict
 import shutil
 
-def eliminate_unused_species_fwf(reg_pc_folder, fwf_pc_folder, elimination_percentage):
+def eliminate_unused_species_fwf(reg_pc_folder, fwf_pc_folder, elimination_percentage, netpcsize):
     pointclouds = select_pointclouds(reg_pc_folder)
     fwf_pointclouds = select_pointclouds(fwf_pc_folder)
     species_list = get_species_distribution_fwf(pointclouds, fwf_pointclouds)
@@ -31,7 +31,9 @@ def eliminate_unused_species_fwf(reg_pc_folder, fwf_pc_folder, elimination_perce
     for pc in os.listdir(reg_pc_folder):
         if pc.endswith(".laz"):
             species = extract_species(pc)
-            if species in species_to_use:
+            pc_path = os.path.join(reg_pc_folder, pc)
+            pc_points = load_point_cloud(pc_path)
+            if species in species_to_use and len(pc_points) > netpcsize/2:
                 base_name = pc.replace("_REG_", "_")
                 pointclouds_dict[base_name]["REG"] = pc
             else:
@@ -39,7 +41,9 @@ def eliminate_unused_species_fwf(reg_pc_folder, fwf_pc_folder, elimination_perce
     for fpc in os.listdir(fwf_pc_folder):
         if fpc.endswith(".laz"):
             species = extract_species(fpc)
-            if species in species_to_use:
+            fpc_path = os.path.join(reg_pc_folder, fpc)
+            fpc_points = load_point_cloud(fpc_path)
+            if species in species_to_use and len(fpc_points) > netpcsize/2:
                 base_name = fpc.replace("_FWF_", "_")
                 pointclouds_dict[base_name]["FWF"] = fpc
             else:
@@ -1415,8 +1419,6 @@ def remove_eliminated_features(combined_metrics_pred, feature_names, eliminated_
     remaining_features: List of feature names that remain after elimination.
     """
     feature_names = np.array(feature_names)
-    print(f"Features in feature_names but not in combined_metrics_pred: {set(feature_names) - set(eliminated_features)}")
-    print(f"Features in eliminated_features but not in feature_names: {set(eliminated_features) - set(feature_names)}")
     mask = np.isin(feature_names, eliminated_features, invert=True)
     try:
         reduced_array = combined_metrics_pred[:, mask]
@@ -1428,8 +1430,6 @@ def remove_eliminated_features(combined_metrics_pred, feature_names, eliminated_
     savename = f"training_rfe_generated_metrics_{capsel}_{growsel}.csv"
     metrics_path = os.path.join(metrics_dir, savename)
     np.savetxt(metrics_path, reduced_array, delimiter=",", header=",".join(remaining_features), comments="")
-    print(f"combined_metrics_pred shape: {combined_metrics_pred.shape}")
-    print(f"Length of feature_names: {len(feature_names)}")
     return reduced_array
 
 def balance_classes(X_pc_unb, X_metrics_unb, X_img_1_unb, X_img_2_unb, y_pc_unb, onehot_to_label_dict):
@@ -1782,7 +1782,7 @@ def compute_echo_width(waveform_data, threshold=0.1):
 #---------          As described in my thesis          ----------
 #----------------------------------------------------------------
 
-def eliminate_unused_species(reg_pc_folder, elimination_percentage):
+def eliminate_unused_species(reg_pc_folder, elimination_percentage, netpcsize):
     pointclouds = select_pointclouds(reg_pc_folder)
     species_list = get_species_distribution(pointclouds)
     species_to_use, species_distribution = eliminate_underrepresented_species(species_list, elimination_percentage)
@@ -1790,8 +1790,10 @@ def eliminate_unused_species(reg_pc_folder, elimination_percentage):
         return filename.split("_")[2]
     for pc in os.listdir(reg_pc_folder):
         if pc.endswith(".laz"):
+            pc_path = os.path.join(reg_pc_folder, pc)
+            pc_points = load_point_cloud(pc_path)
             species = extract_species(pc)
-            if species in species_to_use:
+            if species in species_to_use and len(pc_points) > netpcsize/2:
                 pass
             else:
                 os.remove(os.path.join(reg_pc_folder, pc))
@@ -1969,7 +1971,6 @@ def generate_metrics_for_selected_pointclouds(selected_pointclouds, metrics_dir,
                      "height_kurtosis", "height_skewness", "crown_area", "crown_perimeter", "crown_volume_to_height_ratio", "canopy_cover_fraction", "stem_volume", "canopy_base_height",
                      "surface_area", "surface_to_volume_ratio", "avg_nn_dist", "fract_dimension", "bb_dims", "crown_shape_indices"]
     df_metrics = pd.DataFrame(combined_metrics, columns=feature_names)
-    print(len(prev_elim_features),df_metrics.shape)
     if len(prev_elim_features) > 0:
         eliminated_features = prev_elim_features
         df_metrics_reduced = df_metrics.drop(columns=eliminated_features)

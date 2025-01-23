@@ -66,7 +66,7 @@ def preprocess_data(full_pathlist, ssstest, capsel, growsel, elimper, maxpcscale
     if fwf_av == True:
         logging.info("Creating Test-Set and removing underrepresented species...")
         if workspace_setup.files_extracted(full_pathlist[10]) == 0:
-            species_distribution = preprocessing.eliminate_unused_species_fwf(full_pathlist[6], full_pathlist[7], elimper)
+            species_distribution = preprocessing.eliminate_unused_species_fwf(full_pathlist[6], full_pathlist[7], elimper, netpcsize)
             preprocessing.move_pointclouds_to_preds_fwf(full_pathlist[6], full_pathlist[7], full_pathlist[10], full_pathlist[11])
         else:
             pointclouds = []
@@ -118,7 +118,7 @@ def preprocess_data(full_pathlist, ssstest, capsel, growsel, elimper, maxpcscale
     else:
         logging.info("Creating Test-Set and removing underrepresented species...")
         if workspace_setup.files_extracted(full_pathlist[7]) == 0:
-            species_distribution = preprocessing.eliminate_unused_species(full_pathlist[4], elimper)
+            species_distribution = preprocessing.eliminate_unused_species(full_pathlist[4], elimper, netpcsize)
             preprocessing.move_pointclouds_to_preds(full_pathlist[4], full_pathlist[7])
         else:
             pointclouds = []
