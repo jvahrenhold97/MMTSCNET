@@ -1,14 +1,20 @@
 # MMTSCNet
 This is the official repository for MMTSCNet (Multimodal Tree Species Classification Network). This network was developed to accurately classify LiDAR point clouds of individual trees by augmenting the existing geometric information from the point cloud with metrics and frontal as well as sideways views of the point clouds. This approach ensures as much information as possible is captured and allows for very high accuracies when classifying coniferous and broadleaf tree species.
 
+To start tuning and training MMTSCNet use the following command:
 
+```bash
+python main.py --datadir "C:\The\path\to\the\source\data" --workdir "C:\The\path\to\your\working\folder" --modeldir "C:\The\path\to\your\models\folder" --capsel "ALS" --growsel "LEAF-ON"
+```
+
+but don't forget to change the capture method selection (capsel) and growth state selection (growsel) accordingly.
 
 # Model architecture
 ![alt text](images/MMTSCNet_architecture_updated.png)
 
 The architecture is composed of four branches, each handling a different type of input data, hence the name "Multimodal". The first branch extracts features from 68 different metrics, generated from geometric properties of the point clouds themselves as well as full-waveform LiDAR data if available. The second and third branch use an instance of DenseNet121 to extract features from the frontal and sideways views of the tree point clouds and the third branch acts upon the point cloud directly to extract features. The extracted features are then concazenated to create a single feature vector which is fed into fully-connected layers. The resulting feature-rich vector is then classified by a Softmax-Layer.
 
-Using this architecture, the model is able to achieve an Overall Accuracy (OA) of 96.36%, a macro F1-Score of 0.9589 as well as a Precision of 0.9728 and a Recall of 0.9564 over 7 different tree species. The model was trained and used to predict on the PANGAEA dataset of multi-source segmented LiDAR tree point clouds by Weiser et al., available at [https://doi.pangaea.de/10.1594/PANGAEA.942856](https://doi.pangaea.de/10.1594/PANGAEA.942856), with pre-segmented tree point cluds from multiple forest plots near Karlsruhe and Bretten in Germany.
+Using this architecture, the model is able to achieve an Overall Accuracy (OA) of 96.36%, a macro F1-Score of 0.9589 as well as a Precision of 0.9728 and a Recall of 0.9564 over 7 different tree species. The model was trained and used to predict on the PANGAEA dataset of multi-source segmented LiDAR tree point clouds by Weiser et al., available at [https://doi.pangaea.de/10.1594/PANGAEA.942856](https://doi.pangaea.de/10.1594/PANGAEA.942856), with pre-segmented tree point clouds from multiple forest plots near Karlsruhe and Bretten in Germany.
 
 ![alt text](images/Ka_Br_Extents.png)
 
@@ -122,9 +128,9 @@ WORKING DIRECTORY
 ```
 
 # Usage
-MMTSCNet features two separate modes: Training and Prediction. Before you are able to use MMTSCNet to predict the tree species for any point cloud, it has to be tuned and trained using your custom data. The command to tune MMTSCNet on your data would look something like this:
+Before you are able to use MMTSCNet to predict the tree species for any point cloud, it has to be tuned and trained. The command to tune MMTSCNet on your data would look something like this:
 ```bash
-python main.py --datadir "C:\The\path\to\the\source\data" --workdir "C:\The\path\to\your\working\folder" --modeldir "C:\The\path\to\your\models\folder"
+python main.py --datadir "C:\The\path\to\the\source\data" --workdir "C:\The\path\to\your\working\folder" --modeldir "C:\The\path\to\your\models\folder" --capsel "ALS" --growsel "LEAF-ON"
 ```
 
 To enable debug logging, simply modify the command to:
@@ -132,10 +138,6 @@ To enable debug logging, simply modify the command to:
 python main.py --datadir "C:\The\path\to\the\source\data" --workdir "C:\The\path\to\your\working\folder" --modeldir "C:\The\path\to\your\models\folder" --verbose
 ```
 
-Once training is complete, you can enter prediction mode and precit for your own data like this:
-```bash
-python main.py --datadir "C:\The\path\to\the\source\data" --workdir "C:\The\path\to\your\working\folder" --modeldir "C:\The\path\to\your\models\folder" --prediction
-```
 
 #### Available Arguments:
 ```bash

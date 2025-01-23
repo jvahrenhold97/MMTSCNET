@@ -198,8 +198,8 @@ def perform_hp_tuning(model_dir, X_pc_train, X_img_1_train, X_img_2_train, X_met
     image_shape = (netimgsize, netimgsize, 3)
     metrics_shape = (X_metrics_train.shape[1],)
     batch_size = bsize
-    num_hp_epochs = 7
-    num_hp_trials = 12
+    num_hp_epochs = 6
+    num_hp_trials = 9
     os.chdir(model_dir)
     # Clear the backend to free up memory
     tf.keras.backend.clear_session()

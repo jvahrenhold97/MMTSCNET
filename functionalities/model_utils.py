@@ -622,8 +622,7 @@ class DataGenerator(Sequence):
     def on_epoch_end(self):
         # Shuffle data on CPU
         with tf.device('/CPU:0'):
-            np.random.shuffle(self.indices)
-            
+            np.random.shuffle(self.indices)       
 
 class PointCloudExtractor(tf.keras.layers.Layer):
     """
