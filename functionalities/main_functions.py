@@ -65,7 +65,7 @@ def preprocess_data(full_pathlist, ssstest, capsel, growsel, elimper, maxpcscale
     """
     if fwf_av == True:
         logging.info("Creating Test-Set and removing underrepresented species...")
-        if workspace_setup.get_are_fwf_pcs_extracted(full_pathlist[6]) == False:
+        if workspace_setup.files_extracted(full_pathlist[10]) == 0:
             species_distribution = preprocessing.eliminate_unused_species_fwf(full_pathlist[6], full_pathlist[7], elimper)
             preprocessing.move_pointclouds_to_preds_fwf(full_pathlist[6], full_pathlist[7], full_pathlist[10], full_pathlist[11])
         else:
@@ -102,6 +102,7 @@ def preprocess_data(full_pathlist, ssstest, capsel, growsel, elimper, maxpcscale
         logging.info("Generating metrics for point clouds...")
         combined_metrics_all, feature_names, eliminated_features = preprocessing.generate_metrics_for_selected_pointclouds_fwf(selected_pointclouds_augmented, selected_fwf_pointclouds_augmented, full_pathlist[9], capsel, growsel, [])
         combined_metrics_all_pred, feature_names_pred, elim_features = preprocessing.generate_metrics_for_selected_pointclouds_fwf(selected_pointclouds_pred_augmented, selected_fwf_pointclouds_pred_augmented, full_pathlist[13], capsel, growsel, eliminated_features)
+        print(combined_metrics_all.shape, combined_metrics_all_pred.shape)
         
         logging.info("Collecting image data...")
         images_frontal, images_sideways = preprocessing.match_images_with_pointclouds(selected_pointclouds_augmented, selected_images_augmented)
@@ -116,7 +117,7 @@ def preprocess_data(full_pathlist, ssstest, capsel, growsel, elimper, maxpcscale
         return X_pc_train, X_pc_val, X_pc_pred, X_metrics_train, X_metrics_val, X_metrics_pred, X_img_1_train, X_img_1_val, X_img_1_pred, X_img_2_train, X_img_2_val, X_img_2_pred, y_train, y_val, y_pred, num_classes, label_dict
     else:
         logging.info("Creating Test-Set and removing underrepresented species...")
-        if workspace_setup.get_are_fwf_pcs_extracted(full_pathlist[4]) == False:
+        if workspace_setup.files_extracted(full_pathlist[7]) == 0:
             species_distribution = preprocessing.eliminate_unused_species(full_pathlist[4], elimper)
             preprocessing.move_pointclouds_to_preds(full_pathlist[4], full_pathlist[7])
         else:
@@ -151,6 +152,7 @@ def preprocess_data(full_pathlist, ssstest, capsel, growsel, elimper, maxpcscale
         logging.info("Generating metrics for point clouds...")
         combined_metrics_all, feature_names, eliminated_features = preprocessing.generate_metrics_for_selected_pointclouds(selected_pointclouds_augmented, full_pathlist[6], capsel, growsel, [])
         combined_metrics_all_pred, feature_names_pred, elim_features_pred = preprocessing.generate_metrics_for_selected_pointclouds(selected_pointclouds_pred_augmented, full_pathlist[9], capsel, growsel, eliminated_features)
+        print(combined_metrics_all.shape, combined_metrics_all_pred.shape)
 
         logging.info("Collecting image data...")
         images_frontal, images_sideways = preprocessing.match_images_with_pointclouds(selected_pointclouds_augmented, selected_images_augmented)
@@ -197,7 +199,7 @@ def perform_hp_tuning(model_dir, X_pc_train, X_img_1_train, X_img_2_train, X_met
     metrics_shape = (X_metrics_train.shape[1],)
     batch_size = bsize
     num_hp_epochs = 7
-    num_hp_trials = 10
+    num_hp_trials = 12
     os.chdir(model_dir)
     # Clear the backend to free up memory
     tf.keras.backend.clear_session()
@@ -355,11 +357,10 @@ def perform_training(model, bsz, X_pc_train, X_img_1_train, X_img_2_train, X_met
     y_pred_real = model_utils.map_onehot_to_real(predictions, label_dict)
     y_true_real = model_utils.map_onehot_to_real(y_pred_val, label_dict)
     # Plotting of confusion matrix and training metrics
-    model_utils.plot_conf_matrix(y_true_real, y_pred_real, modeldir, plot_path, label_dict, capsel, growsel, netpcsize)
     model_utils.plot_best_epoch_metrics(history, plot_path)
     model.summary()
     # I/O ops
     model_path = model_utils.get_trained_model_folder(modeldir, capsel, growsel)
     trained_model = model_utils.load_trained_model_from_folder(model_path)
     gc.collect()
-    return trained_model
+    return trained_model, plot_path

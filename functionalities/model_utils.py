@@ -262,7 +262,7 @@ def create_label_mapping(onehot_to_label_dict):
     int_to_label = {idx: label for label, idx in label_to_int.items()}
     return label_to_int, int_to_label
 
-def predict_for_data(trained_model, X_pc_pred, X_metrics_pred, X_img_1_pred, X_img_2_pred, y_pred, label_dict, modeldir, capsel, growsel, netpcsize):
+def predict_for_data(trained_model, X_pc_pred, X_metrics_pred, X_img_1_pred, X_img_2_pred, y_pred, label_dict, modeldir, capsel, growsel, netpcsize, plot_path):
     """
     Predicts for data with a trained instance of MMTSCNet.
 
@@ -295,7 +295,7 @@ def predict_for_data(trained_model, X_pc_pred, X_metrics_pred, X_img_1_pred, X_i
     y_pred_real = map_onehot_to_real(predictions, label_dict)
     y_true_real = map_onehot_to_real(y_pred, label_dict)
     # Plotting of confusion matrix and training metrics
-    plot_conf_matrix(y_true_real, y_pred_real, modeldir, modeldir, label_dict, capsel, growsel, netpcsize)
+    plot_conf_matrix(y_true_real, y_pred_real, modeldir, plot_path, label_dict, capsel, growsel, netpcsize)
         
 def check_label_corruption(one_hot_labels):
     """

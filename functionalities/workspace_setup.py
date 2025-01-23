@@ -561,3 +561,9 @@ def copy_files_for_prediction(las_unzipped_path, las_working_path, capsel, grows
                                         tree_index += 1
     else:
         logging.info("Files have been extracted already, skipping!")
+
+def files_extracted(directory):
+    counter = 0
+    for file in os.listdir(directory):
+        counter += 1
+    return counter

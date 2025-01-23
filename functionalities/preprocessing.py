@@ -36,7 +36,6 @@ def eliminate_unused_species_fwf(reg_pc_folder, fwf_pc_folder, elimination_perce
                 pointclouds_dict[base_name]["REG"] = pc
             else:
                 os.remove(os.path.join(reg_pc_folder, pc))
-                print(f"Deleted: {pc} (Not in species_to_use)")
     for fpc in os.listdir(fwf_pc_folder):
         if fpc.endswith(".laz"):
             species = extract_species(fpc)
@@ -45,7 +44,6 @@ def eliminate_unused_species_fwf(reg_pc_folder, fwf_pc_folder, elimination_perce
                 pointclouds_dict[base_name]["FWF"] = fpc
             else:
                 os.remove(os.path.join(fwf_pc_folder, fpc))
-                print(f"Deleted: {fpc} (Not in species_to_use)")
     return species_distribution
 
 def move_pointclouds_to_preds_fwf(reg_pc_folder, fwf_pc_folder, reg_pc_pred_folder, fwf_pc_pred_folder):
@@ -58,32 +56,36 @@ def move_pointclouds_to_preds_fwf(reg_pc_folder, fwf_pc_folder, reg_pc_pred_fold
     reg_pc_pred_folder (str): Destination folder for REG point clouds.
     fwf_pc_pred_folder (str): Destination folder for FWF point clouds.
     """
-    species_dict = defaultdict(lambda: {"REG": [], "FWF": []})
-    for pc in os.listdir(reg_pc_folder):
-        if pc.endswith(".laz"):
-            species = pc.split("_")[2]
-            species_dict[species]["REG"].append(pc)
-    for fpc in os.listdir(fwf_pc_folder):
-        if fpc.endswith(".laz"):
-            species = fpc.split("_")[2]
-            species_dict[species]["FWF"].append(fpc)
-    for species in species_dict.keys():
-        species_dict[species]["REG"].sort()
-        species_dict[species]["FWF"].sort()
-    for species, files in species_dict.items():
-        reg_files = files["REG"]
-        fwf_files = files["FWF"]
-        paired_files = list(zip(reg_files, fwf_files))
-        for i in range(8, len(paired_files), 9):
-            reg_file, fwf_file = paired_files[i]
-            reg_src = os.path.join(reg_pc_folder, reg_file)
-            reg_dst = os.path.join(reg_pc_pred_folder, reg_file)
-            shutil.move(reg_src, reg_dst)
-            print(f"Moved: {reg_file} → {reg_pc_pred_folder} (Species: {species})")
-            fwf_src = os.path.join(fwf_pc_folder, fwf_file)
-            fwf_dst = os.path.join(fwf_pc_pred_folder, fwf_file)
-            shutil.move(fwf_src, fwf_dst)
-            print(f"Moved: {fwf_file} → {fwf_pc_pred_folder} (Species: {species})")
+    # Gather all filenames
+    reg_pointclouds = sorted([pc for pc in os.listdir(reg_pc_folder)])
+    fwf_pointclouds = sorted([pc for pc in os.listdir(fwf_pc_folder)])
+    species_counters = {}
+    for reg_pc in reg_pointclouds:
+        reg_parts = reg_pc.split("_")
+        if len(reg_parts) < 3:
+            continue
+        reg_id = reg_parts[0]
+        species = reg_parts[2]
+        fwf_pc = next((fpc for fpc in fwf_pointclouds if fpc.startswith(reg_id + "_") and species in fpc), None)
+        if fwf_pc:
+            if species not in species_counters:
+                species_counters[species] = 0
+            species_counters[species] += 1
+            if species_counters[species] % 9 == 0:
+                reg_src = os.path.join(reg_pc_folder, reg_pc)
+                fwf_src = os.path.join(fwf_pc_folder, fwf_pc)
+                reg_dst = os.path.join(reg_pc_pred_folder, reg_pc)
+                fwf_dst = os.path.join(fwf_pc_pred_folder, fwf_pc)
+                os.makedirs(reg_pc_pred_folder, exist_ok=True)
+                os.makedirs(fwf_pc_pred_folder, exist_ok=True)
+                try:
+                    shutil.move(reg_src, reg_dst)
+                except Exception as e:
+                    print(f"❌ Error moving {reg_pc}: {e}")
+                try:
+                    shutil.move(fwf_src, fwf_dst)
+                except Exception as e:
+                    print(f"❌ Error moving {fwf_pc}: {e}")
 
 def select_pointclouds(pointcloud_folder):
     """
@@ -909,7 +911,6 @@ def load_point_cloud(file_path):
     Returns:
     points: Array of individual points of the point cloud.
     """
-    print(file_path)
     try:
         las_file = lp.read(file_path)
         points = np.vstack((las_file.x, las_file.y, las_file.z)).transpose()
@@ -1301,8 +1302,9 @@ def generate_training_data(capsel, growsel, filtered_pointclouds, resampled_poin
         logging.debug("Loaded metrics of shape %s and %s", combined_eliminated_metrics.shape, combined_eliminated_metrics_pred.shape)
     else:
         combined_eliminated_metrics, eliminated_features = perform_recursive_feature_elimination_with_threshold(capsel, growsel, combined_metrics, elimination_labels, metrics_dir, rfe_threshold, feature_names)
-        combined_eliminated_metrics_pred = remove_eliminated_features(combined_metrics_pred, feature_names, eliminated_features)
-        logging.debug("Metrics shape after Recursive Feature Elimination: %s, %s", combined_eliminated_metrics.shape, combined_eliminated_metrics_pred.shape)
+        logging.info("Eliminated features shape: %s", len(eliminated_features))
+        combined_eliminated_metrics_pred = remove_eliminated_features(combined_metrics_pred, feature_names, eliminated_features, metrics_dir_pred, capsel, growsel)
+        logging.info("Metrics shape after Recursive Feature Elimination: %s, %s", combined_eliminated_metrics.shape, combined_eliminated_metrics_pred.shape)
 
     logging.debug("Tree species to train on: %s", np.unique(tree_labels))
     logging.info("One-Hot encoding labels!")
@@ -1323,7 +1325,7 @@ def generate_training_data(capsel, growsel, filtered_pointclouds, resampled_poin
     X_img_2_pred = images_sideways_pred
 
     logging.info("Performing Stratified-Shuffle-Split!")
-    sss = StratifiedShuffleSplit(n_splits=5, test_size=0.1, random_state=42)
+    sss = StratifiedShuffleSplit(n_splits=5, test_size=sss_testsize, random_state=42)
     for train_index_temp, pred_index in sss.split(X_pc, np.argmax(y, axis=1)):
         X_pc_train, X_pc_val = X_pc[train_index_temp], X_pc[pred_index]
         X_metrics_train, X_metrics_val = X_metrics[train_index_temp], X_metrics[pred_index]
@@ -1380,8 +1382,6 @@ def perform_recursive_feature_elimination_with_threshold(capsel, growsel, X, y, 
     save_metrics_to_csv_pandas(X_reduced, metrics_path)
     logging.info(f"Number of features kept: {len(selected_feature_names)}")
     logging.info(f"Number of features eliminated: {len(eliminated_feature_names)}")
-    print(f"Selected Features: {selected_feature_names}")
-    print(f"Eliminated Features: {eliminated_feature_names}")
     importance_df = pd.DataFrame({
         "Feature": feature_names,
         "Importance": feature_importances
@@ -1401,7 +1401,7 @@ def perform_recursive_feature_elimination_with_threshold(capsel, growsel, X, y, 
     logging.info(f"Feature importances plot saved to {plot_path}")
     return X_reduced, eliminated_feature_names
 
-def remove_eliminated_features(combined_metrics_pred, feature_names, eliminated_features):
+def remove_eliminated_features(combined_metrics_pred, feature_names, eliminated_features, metrics_dir, capsel, growsel):
     """
     Removes columns from a DataFrame where the feature name is in the eliminated_features list.
 
@@ -1414,9 +1414,23 @@ def remove_eliminated_features(combined_metrics_pred, feature_names, eliminated_
     reduced_df: DataFrame with eliminated features removed.
     remaining_features: List of feature names that remain after elimination.
     """
-    df = pd.DataFrame(combined_metrics_pred, columns=feature_names)
-    reduced_df = df.drop(columns=eliminated_features, errors="ignore")
-    return reduced_df
+    feature_names = np.array(feature_names)
+    print(f"Features in feature_names but not in combined_metrics_pred: {set(feature_names) - set(eliminated_features)}")
+    print(f"Features in eliminated_features but not in feature_names: {set(eliminated_features) - set(feature_names)}")
+    mask = np.isin(feature_names, eliminated_features, invert=True)
+    try:
+        reduced_array = combined_metrics_pred[:, mask]
+    except IndexError as e:
+        print(f"Error: {e}")
+        print(f"Mask shape: {mask.shape}, Array shape: {combined_metrics_pred.shape}")
+        raise
+    remaining_features = feature_names[mask]
+    savename = f"training_rfe_generated_metrics_{capsel}_{growsel}.csv"
+    metrics_path = os.path.join(metrics_dir, savename)
+    np.savetxt(metrics_path, reduced_array, delimiter=",", header=",".join(remaining_features), comments="")
+    print(f"combined_metrics_pred shape: {combined_metrics_pred.shape}")
+    print(f"Length of feature_names: {len(feature_names)}")
+    return reduced_array
 
 def balance_classes(X_pc_unb, X_metrics_unb, X_img_1_unb, X_img_2_unb, y_pc_unb, onehot_to_label_dict):
     """
@@ -1434,8 +1448,6 @@ def balance_classes(X_pc_unb, X_metrics_unb, X_img_1_unb, X_img_2_unb, y_pc_unb,
     y_decoded = [onehot_to_label_dict[np.argmax(label)] for label in y_pc_unb]
     class_counts = Counter(y_decoded)
     min_count = min(class_counts.values())
-    print(f"Class distribution before balancing: {class_counts}")
-    print(f"Downsampling all classes to {min_count} samples.")
     X_pc_balanced, X_metrics_balanced, X_img_1_balanced, X_img_2_balanced, y_balanced = [], [], [], [], []
     for class_name in class_counts.keys():
         indices = [i for i, label in enumerate(y_decoded) if label == class_name]
@@ -1451,7 +1463,6 @@ def balance_classes(X_pc_unb, X_metrics_unb, X_img_1_unb, X_img_2_unb, y_pc_unb,
     X_img_2 = np.array(X_img_2_balanced)
     y_pc = np.array(y_balanced)
     balanced_counts = Counter([onehot_to_label_dict[np.argmax(label)] for label in y_balanced])
-    print(f"Class distribution after balancing: {balanced_counts}")
     return X_pc, X_metrics, X_img_1, X_img_2, y_pc
 
 def print_class_distribution(y_train, y_val, y_pred, onehot_to_label_dict):
@@ -1479,8 +1490,6 @@ def print_class_distribution(y_train, y_val, y_pred, onehot_to_label_dict):
     df = pd.DataFrame(data)
     df["Total"] = df["Train Count"] + df["Validation Count"] + df["Prediction Count"]
     df.sort_values(by="Total", ascending=False, inplace=True)
-    print("\nClass Distribution Statistics:\n")
-    print(df.to_string(index=False))
 
 #----------------------------------------------------------------
 #---------             Numerical Features              ----------
@@ -1786,7 +1795,6 @@ def eliminate_unused_species(reg_pc_folder, elimination_percentage):
                 pass
             else:
                 os.remove(os.path.join(reg_pc_folder, pc))
-                print(f"Deleted: {pc} (Not in species_to_use)")
     return species_distribution
 
 def move_pointclouds_to_preds(reg_pc_folder, reg_pc_pred_folder):
@@ -1798,18 +1806,24 @@ def move_pointclouds_to_preds(reg_pc_folder, reg_pc_pred_folder):
     reg_pc_folder (str): Source folder containing point clouds.
     reg_pc_pred_folder (str): Destination folder for selected point clouds.
     """
-    species_dict = defaultdict(list)
-    for pc in os.listdir(reg_pc_folder):
-        if pc.endswith(".laz"):
-            species = pc.split("_")[2]
-            species_dict[species].append(pc)
-    for species, files in species_dict.items():
-        files.sort()
-        for i in range(8, len(files), 9):
-            reg_src = os.path.join(reg_pc_folder, files[i])
-            reg_dst = os.path.join(reg_pc_pred_folder, files[i])
-            shutil.move(reg_src, reg_dst)
-            print(f"Moved: {files[i]} → {reg_pc_pred_folder} (Species: {species})")
+    reg_pointclouds = sorted([pc for pc in os.listdir(reg_pc_folder) if pc.endswith(".laz")])
+    species_counters = {}
+    for reg_pc in reg_pointclouds:
+        parts = reg_pc.split("_")
+        if len(parts) < 3:
+            continue
+        species = parts[2]
+        if species not in species_counters:
+            species_counters[species] = 0
+        species_counters[species] += 1
+        if species_counters[species] % 9 == 0:
+            reg_src = os.path.join(reg_pc_folder, reg_pc)
+            reg_dst = os.path.join(reg_pc_pred_folder, reg_pc)
+            os.makedirs(reg_pc_pred_folder, exist_ok=True)
+            try:
+                shutil.move(reg_src, reg_dst)
+            except Exception as e:
+                print(f"❌ Error moving {reg_pc}: {e}")
 
 def get_species_distribution(selected_pointclouds):
     """
@@ -1955,6 +1969,7 @@ def generate_metrics_for_selected_pointclouds(selected_pointclouds, metrics_dir,
                      "height_kurtosis", "height_skewness", "crown_area", "crown_perimeter", "crown_volume_to_height_ratio", "canopy_cover_fraction", "stem_volume", "canopy_base_height",
                      "surface_area", "surface_to_volume_ratio", "avg_nn_dist", "fract_dimension", "bb_dims", "crown_shape_indices"]
     df_metrics = pd.DataFrame(combined_metrics, columns=feature_names)
+    print(len(prev_elim_features),df_metrics.shape)
     if len(prev_elim_features) > 0:
         eliminated_features = prev_elim_features
         df_metrics_reduced = df_metrics.drop(columns=eliminated_features)
@@ -1969,6 +1984,7 @@ def generate_metrics_for_selected_pointclouds(selected_pointclouds, metrics_dir,
         logging.info(f"Removed {len(highly_correlated_features)} redundant features due to high correlation.")
         logging.info(f"Remaining features: {len(selected_features)}")
         combined_metrics = df_metrics_reduced.to_numpy()
+        eliminated_features = highly_correlated_features.copy()
     return combined_metrics, selected_features, eliminated_features
 
 def compute_combined_metrics(points):
