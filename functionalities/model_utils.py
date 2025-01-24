@@ -283,7 +283,9 @@ def predict_for_data(trained_model, X_pc_pred, X_metrics_pred, X_img_1_pred, X_i
     Returns:
     (Saved): A classified plot point cloud.
     """
-    # Create predictions and translate labels
+    print("Min values of X_metrics_pred:", np.min(X_metrics_pred, axis=0))
+    print("Max values of X_metrics_pred:", np.max(X_metrics_pred, axis=0))
+    print("Columns where max == min:", np.where(np.min(X_metrics_pred, axis=0) == np.max(X_metrics_pred, axis=0))[0])
     X_img_1_pred, X_img_2_pred, X_pc_pred, X_metrics_pred = normalize_data(X_pc_pred, X_img_1_pred, X_img_2_pred, X_metrics_pred)
     check_data(X_pc_pred, X_img_1_pred, X_img_2_pred, X_metrics_pred, y_pred)
     corruption_found = check_label_corruption(y_pred)
@@ -542,26 +544,25 @@ def check_data(X_train, X_img_1, X_img_2, X_metrics, y_train):
     
 def normalize_data(X_pc, X_img_1, X_img_2, X_metrics):
     """
-    Normalizes input data to common conditions.
-
-    Args:
-    X_train: Point clouds.
-    X_img_1: Frontal images.
-    X_img_2: Sideways images.
-    X_metrics: Numerical features.
-
-    Returns:
-    X_train: Normalized point clouds.
-    X_img_1: Normalized frontal images.
-    X_img_2: Normalized sideways images.
-    X_metrics: Normalized numerical features.
+    Normalizes input data to common conditions while preventing NaN values.
     """
     X_img_1 = X_img_1 / 255.0
     X_img_2 = X_img_2 / 255.0
+    # Point cloud normalization
     scaler_pc = MinMaxScaler()
     X_pc = scaler_pc.fit_transform(X_pc.reshape(-1, X_pc.shape[-1])).reshape(X_pc.shape)
+    # Metrics normalization with safeguard
     scaler_metrics = MinMaxScaler()
+    min_vals = np.min(X_metrics, axis=0)
+    max_vals = np.max(X_metrics, axis=0)
+    # Identify constant columns
+    constant_columns = np.where(min_vals == max_vals)[0]
+    # Replace constant columns with zeros to prevent division by zero
+    for col in constant_columns:
+        X_metrics[:, col] = np.mean(X_metrics[:, col])
+    # Apply scaling
     X_metrics = scaler_metrics.fit_transform(X_metrics.reshape(-1, X_metrics.shape[-1])).reshape(X_metrics.shape)
+    # Clipping
     X_pc = np.clip(X_pc, 0, 1)
     X_metrics = np.clip(X_metrics, 0, 1)
     X_img_1 = np.clip(X_img_1, 0, 1)

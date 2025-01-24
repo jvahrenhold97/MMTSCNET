@@ -102,8 +102,12 @@ def preprocess_data(full_pathlist, ssstest, capsel, growsel, elimper, maxpcscale
         logging.info("Generating metrics for point clouds...")
         combined_metrics_all, feature_names, eliminated_features = preprocessing.generate_metrics_for_selected_pointclouds_fwf(selected_pointclouds_augmented, selected_fwf_pointclouds_augmented, full_pathlist[9], capsel, growsel, [])
         combined_metrics_all_pred, feature_names_pred, elim_features = preprocessing.generate_metrics_for_selected_pointclouds_fwf(selected_pointclouds_pred_augmented, selected_fwf_pointclouds_pred_augmented, full_pathlist[13], capsel, growsel, eliminated_features)
-        print(combined_metrics_all.shape, combined_metrics_all_pred.shape)
-        
+        combined_metrics_all_cleaned, combined_metrics_all_pred_cleaned, dropped_cols = preprocessing.drop_nan_columns(combined_metrics_all, combined_metrics_all_pred)
+        logging.info("Dropped columns indices: %s", dropped_cols)
+        feature_names_cleaned = [name for i, name in enumerate(feature_names) if i not in dropped_cols]
+        logging.info("New shape of combined_metrics_all: %s", combined_metrics_all_cleaned.shape)
+        logging.info("New shape of combined_metrics_all_pred: %s", combined_metrics_all_pred_cleaned.shape)
+
         logging.info("Collecting image data...")
         images_frontal, images_sideways = preprocessing.match_images_with_pointclouds(selected_pointclouds_augmented, selected_images_augmented)
         images_frontal_pred, images_sideways_pred = preprocessing.match_images_with_pointclouds(selected_pointclouds_pred_augmented, selected_images_pred_augmented)
@@ -113,7 +117,7 @@ def preprocess_data(full_pathlist, ssstest, capsel, growsel, elimper, maxpcscale
         images_side_pred = np.asarray(images_sideways_pred)
 
         logging.info("Creating final Training-, Validation- and Test-Set...")
-        X_pc_train, X_pc_val, X_pc_pred, X_metrics_train, X_metrics_val, X_metrics_pred, X_img_1_train, X_img_1_val, X_img_1_pred, X_img_2_train, X_img_2_val, X_img_2_pred, y_train, y_val, y_pred, num_classes, label_dict = preprocessing.generate_training_data(capsel, growsel, selected_pointclouds_augmented, resampled_pointclouds, selected_pointclouds_pred_augmented, resampled_pointclouds_pred, combined_metrics_all, combined_metrics_all_pred, images_front, images_side, images_front_pred, images_side_pred, ssstest, full_pathlist[9], full_pathlist[13], 0.008, feature_names)
+        X_pc_train, X_pc_val, X_pc_pred, X_metrics_train, X_metrics_val, X_metrics_pred, X_img_1_train, X_img_1_val, X_img_1_pred, X_img_2_train, X_img_2_val, X_img_2_pred, y_train, y_val, y_pred, num_classes, label_dict = preprocessing.generate_training_data(capsel, growsel, selected_pointclouds_augmented, resampled_pointclouds, selected_pointclouds_pred_augmented, resampled_pointclouds_pred, combined_metrics_all_cleaned, combined_metrics_all_pred_cleaned, images_front, images_side, images_front_pred, images_side_pred, ssstest, full_pathlist[9], full_pathlist[13], 0.008, feature_names_cleaned)
         return X_pc_train, X_pc_val, X_pc_pred, X_metrics_train, X_metrics_val, X_metrics_pred, X_img_1_train, X_img_1_val, X_img_1_pred, X_img_2_train, X_img_2_val, X_img_2_pred, y_train, y_val, y_pred, num_classes, label_dict
     else:
         logging.info("Creating Test-Set and removing underrepresented species...")
@@ -152,7 +156,11 @@ def preprocess_data(full_pathlist, ssstest, capsel, growsel, elimper, maxpcscale
         logging.info("Generating metrics for point clouds...")
         combined_metrics_all, feature_names, eliminated_features = preprocessing.generate_metrics_for_selected_pointclouds(selected_pointclouds_augmented, full_pathlist[6], capsel, growsel, [])
         combined_metrics_all_pred, feature_names_pred, elim_features_pred = preprocessing.generate_metrics_for_selected_pointclouds(selected_pointclouds_pred_augmented, full_pathlist[9], capsel, growsel, eliminated_features)
-        print(combined_metrics_all.shape, combined_metrics_all_pred.shape)
+        combined_metrics_all_cleaned, combined_metrics_all_pred_cleaned, dropped_cols = preprocessing.drop_nan_columns(combined_metrics_all, combined_metrics_all_pred)
+        logging.info("Dropped columns indices: %s", dropped_cols)
+        feature_names_cleaned = [name for i, name in enumerate(feature_names) if i not in dropped_cols]
+        logging.info("New shape of combined_metrics_all: %s", combined_metrics_all_cleaned.shape)
+        logging.info("New shape of combined_metrics_all_pred: %s", combined_metrics_all_pred_cleaned.shape)
 
         logging.info("Collecting image data...")
         images_frontal, images_sideways = preprocessing.match_images_with_pointclouds(selected_pointclouds_augmented, selected_images_augmented)
@@ -163,7 +171,7 @@ def preprocess_data(full_pathlist, ssstest, capsel, growsel, elimper, maxpcscale
         images_side_pred = np.asarray(images_sideways_pred)
 
         logging.info("Creating final Training-, Validation- and Test-Set...")
-        X_pc_train, X_pc_val, X_pc_pred, X_metrics_train, X_metrics_val, X_metrics_pred, X_img_1_train, X_img_1_val, X_img_1_pred, X_img_2_train, X_img_2_val, X_img_2_pred, y_train, y_val, y_pred, num_classes, label_dict = preprocessing.generate_training_data(capsel, growsel, selected_pointclouds_augmented, resampled_pointclouds, selected_pointclouds_pred_augmented, resampled_pointclouds_pred, combined_metrics_all, combined_metrics_all_pred, images_front, images_side, images_front_pred, images_side_pred, ssstest, full_pathlist[6], full_pathlist[9], 0.008, feature_names)
+        X_pc_train, X_pc_val, X_pc_pred, X_metrics_train, X_metrics_val, X_metrics_pred, X_img_1_train, X_img_1_val, X_img_1_pred, X_img_2_train, X_img_2_val, X_img_2_pred, y_train, y_val, y_pred, num_classes, label_dict = preprocessing.generate_training_data(capsel, growsel, selected_pointclouds_augmented, resampled_pointclouds, selected_pointclouds_pred_augmented, resampled_pointclouds_pred, combined_metrics_all_cleaned, combined_metrics_all_pred_cleaned, images_front, images_side, images_front_pred, images_side_pred, ssstest, full_pathlist[6], full_pathlist[9], 0.008, feature_names_cleaned)
         return X_pc_train, X_pc_val, X_pc_pred, X_metrics_train, X_metrics_val, X_metrics_pred, X_img_1_train, X_img_1_val, X_img_1_pred, X_img_2_train, X_img_2_val, X_img_2_pred, y_train, y_val, y_pred, num_classes, label_dict
     
 def perform_hp_tuning(model_dir, X_pc_train, X_img_1_train, X_img_2_train, X_metrics_train, y_train, X_pc_val, X_img_1_val, X_img_2_val, X_metrics_val, y_val, bsize, netpcsize, netimgsize, num_classes, capsel, growsel, fwf_av):
@@ -198,8 +206,8 @@ def perform_hp_tuning(model_dir, X_pc_train, X_img_1_train, X_img_2_train, X_met
     image_shape = (netimgsize, netimgsize, 3)
     metrics_shape = (X_metrics_train.shape[1],)
     batch_size = bsize
-    num_hp_epochs = 6
-    num_hp_trials = 9
+    num_hp_epochs = 7
+    num_hp_trials = 10
     os.chdir(model_dir)
     # Clear the backend to free up memory
     tf.keras.backend.clear_session()
@@ -321,7 +329,7 @@ def perform_training(model, bsz, X_pc_train, X_img_1_train, X_img_2_train, X_met
     train_gen.on_epoch_end()
     val_gen.on_epoch_end()
     # Callback definition
-    early_stopping = tf.keras.callbacks.EarlyStopping(monitor='val_accuracy', patience=20, restore_best_weights=True)
+    early_stopping = tf.keras.callbacks.EarlyStopping(monitor='val_accuracy', patience=15, restore_best_weights=True)
     reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(monitor='val_accuracy', factor=0.95, patience=3, min_lr=1e-6)
     degrade_lr = tf.keras.callbacks.LearningRateScheduler(model_utils.scheduler)
     macro_f1_callback = model_utils.MacroF1ScoreCallback(validation_data=val_gen, batch_size=bsz)
@@ -353,9 +361,6 @@ def perform_training(model, bsz, X_pc_train, X_img_1_train, X_img_2_train, X_met
         pass
     # Prediction on validation data
     predictions = model.predict([X_pc_val, X_img_1_val, X_img_2_val, X_metrics_val], batch_size=8, verbose=1)
-    # Translation of labels
-    y_pred_real = model_utils.map_onehot_to_real(predictions, label_dict)
-    y_true_real = model_utils.map_onehot_to_real(y_pred_val, label_dict)
     # Plotting of confusion matrix and training metrics
     model_utils.plot_best_epoch_metrics(history, plot_path)
     model.summary()

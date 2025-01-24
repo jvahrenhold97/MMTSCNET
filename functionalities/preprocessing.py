@@ -1247,6 +1247,15 @@ def match_images_with_pointclouds(selected_pointclouds, selected_images):
                     pass
     return frontal_images, sideways_images
 
+def drop_nan_columns(arr1, arr2):
+    nan_columns_arr1 = np.any(np.isnan(arr1), axis=0)
+    nan_columns_arr2 = np.any(np.isnan(arr2), axis=0)
+    nan_columns = nan_columns_arr1 | nan_columns_arr2
+    arr1_cleaned = arr1[:, ~nan_columns]
+    arr2_cleaned = arr2[:, ~nan_columns]
+    dropped_indices = np.where(nan_columns)[0].tolist()
+    return arr1_cleaned, arr2_cleaned, dropped_indices
+
 def generate_training_data(capsel, growsel, filtered_pointclouds, resampled_pointclouds, filtered_pointclouds_pred, resampled_pointclouds_pred, combined_metrics, combined_metrics_pred, images_frontal, images_sideways, images_frontal_pred, images_sideways_pred, sss_testsize, metrics_dir, metrics_dir_pred, rfe_threshold, feature_names):
     """
     Generates training data.
@@ -1292,23 +1301,25 @@ def generate_training_data(capsel, growsel, filtered_pointclouds, resampled_poin
             rfe_metrics.append(file)
         else:
             pass
-    for file in os.listdir(metrics_dir_pred):
-        if "training_rfe" in file:
-            rfe_metrics_pred.append(file)
+    for file_pred in os.listdir(metrics_dir_pred):
+        if "training_rfe" in file_pred:
+            rfe_metrics_pred.append(file_pred)
         else:
             pass
+    print("NaN count in combined_metrics_pred before processing:", np.isnan(combined_metrics_pred).sum())
 
     if len(rfe_metrics) > 0:
         rfe_metrics_path = main_utils.join_paths(metrics_dir, rfe_metrics[0])
         combined_eliminated_metrics = load_metrics_from_path(rfe_metrics_path)
         rfe_metrics_pred_path = main_utils.join_paths(metrics_dir_pred, rfe_metrics_pred[0])
         combined_eliminated_metrics_pred = load_metrics_from_path(rfe_metrics_pred_path)
-        logging.debug("Loaded metrics of shape %s and %s", combined_eliminated_metrics.shape, combined_eliminated_metrics_pred.shape)
+        logging.info("Loaded metrics of shape %s and %s", combined_eliminated_metrics.shape, combined_eliminated_metrics_pred.shape)
     else:
         combined_eliminated_metrics, eliminated_features = perform_recursive_feature_elimination_with_threshold(capsel, growsel, combined_metrics, elimination_labels, metrics_dir, rfe_threshold, feature_names)
         logging.info("Eliminated features shape: %s", len(eliminated_features))
         combined_eliminated_metrics_pred = remove_eliminated_features(combined_metrics_pred, feature_names, eliminated_features, metrics_dir_pred, capsel, growsel)
         logging.info("Metrics shape after Recursive Feature Elimination: %s, %s", combined_eliminated_metrics.shape, combined_eliminated_metrics_pred.shape)
+    print("NaN count in X_metrics_pred after feature elimination:", np.isnan(combined_eliminated_metrics_pred).sum())
 
     logging.debug("Tree species to train on: %s", np.unique(tree_labels))
     logging.info("One-Hot encoding labels!")
@@ -1429,8 +1440,9 @@ def remove_eliminated_features(combined_metrics_pred, feature_names, eliminated_
     remaining_features = feature_names[mask]
     savename = f"training_rfe_generated_metrics_{capsel}_{growsel}.csv"
     metrics_path = os.path.join(metrics_dir, savename)
-    np.savetxt(metrics_path, reduced_array, delimiter=",", header=",".join(remaining_features), comments="")
-    return reduced_array
+    np.savetxt(metrics_path, reduced_array, delimiter=",")
+    metrics_array = load_metrics_from_path(metrics_path)
+    return metrics_array
 
 def balance_classes(X_pc_unb, X_metrics_unb, X_img_1_unb, X_img_2_unb, y_pc_unb, onehot_to_label_dict):
     """
