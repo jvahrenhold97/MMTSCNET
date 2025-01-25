@@ -28,7 +28,7 @@ def run_mmtscnet():
             logging.info("Training MMTSCNet...")
             trained_model, plot_path = main_functions.perform_training(untrained_model, bsize, X_pc_train, X_img_1_train, X_img_2_train, X_metrics_train, y_train, X_pc_val, X_img_1_val, X_img_2_val, X_metrics_val, y_val, model_dir, label_dict, cap_sel, grow_sel, pc_size, fwf_av, optimal_learning_rate)
             logging.info("Training finished, predicting...")
-            model_utils.predict_for_data(trained_model, X_pc_pred, X_metrics_pred, X_img_1_pred, X_img_2_pred, y_pred, label_dict, model_dir, cap_sel, grow_sel, pc_size, plot_path)
+            model_utils.predict_for_data(trained_model, X_pc_val, X_metrics_val, X_img_1_val, X_img_2_val, y_val ,X_pc_pred, X_metrics_pred, X_img_1_pred, X_img_2_pred, y_pred, label_dict, model_dir, cap_sel, grow_sel, pc_size, plot_path)
         except Exception as e:
             logging.exception("An error occurred: %s", e)
             time.sleep(3)

@@ -66,6 +66,7 @@ def preprocess_data(full_pathlist, ssstest, capsel, growsel, elimper, maxpcscale
     if fwf_av == True:
         logging.info("Creating Test-Set and removing underrepresented species...")
         if workspace_setup.files_extracted(full_pathlist[10]) == 0:
+            preprocessing.remove_insufficient_pointclouds_fwf(full_pathlist[6], full_pathlist[7], netpcsize*0.75)
             species_distribution = preprocessing.eliminate_unused_species_fwf(full_pathlist[6], full_pathlist[7], elimper, netpcsize)
             preprocessing.move_pointclouds_to_preds_fwf(full_pathlist[6], full_pathlist[7], full_pathlist[10], full_pathlist[11])
         else:
@@ -84,10 +85,6 @@ def preprocess_data(full_pathlist, ssstest, capsel, growsel, elimper, maxpcscale
         logging.info("Augmenting point clouds...")
         preprocessing.augment_selection_fwf(unaugmented_regular_pointclouds, unaugmented_fwf_pointclouds, maxpcscale, full_pathlist[6], full_pathlist[7], species_distribution)
         preprocessing.augment_selection_fwf(unaugmented_regular_pred_pointclouds, unaugmented_fwf_pred_pointclouds, maxpcscale, full_pathlist[10], full_pathlist[11], species_distribution)
-        
-        logging.info("Generating images...")
-        preprocessing.generate_colored_images(netimgsize, full_pathlist[6], full_pathlist[8])
-        preprocessing.generate_colored_images(netimgsize, full_pathlist[10], full_pathlist[12])
 
         logging.info("Resampling point clouds using FPS...")
         selected_pointclouds_augmented, selected_fwf_pointclouds_augmented, selected_images_augmented = preprocessing.get_user_specified_data_fwf(full_pathlist[6], full_pathlist[7], full_pathlist[8], capsel, growsel)
@@ -100,21 +97,31 @@ def preprocess_data(full_pathlist, ssstest, capsel, growsel, elimper, maxpcscale
         resampled_pointclouds_pred = np.array([preprocessing.resample_pointcloud(centered_points_pred, netpcsize, i) for i in range(len(centered_points_pred))])
 
         logging.info("Generating metrics for point clouds...")
-        combined_metrics_all, feature_names, eliminated_features = preprocessing.generate_metrics_for_selected_pointclouds_fwf(selected_pointclouds_augmented, selected_fwf_pointclouds_augmented, full_pathlist[9], capsel, growsel, [])
-        combined_metrics_all_pred, feature_names_pred, elim_features = preprocessing.generate_metrics_for_selected_pointclouds_fwf(selected_pointclouds_pred_augmented, selected_fwf_pointclouds_pred_augmented, full_pathlist[13], capsel, growsel, eliminated_features)
+        combined_metrics_all, feature_names, eliminated_features, max_crown_height = preprocessing.generate_metrics_for_selected_pointclouds_fwf(selected_pointclouds_augmented, selected_fwf_pointclouds_augmented, full_pathlist[9], capsel, growsel, [])
+        combined_metrics_all_pred, feature_names_pred, elim_features, max_crown_height_pred = preprocessing.generate_metrics_for_selected_pointclouds_fwf(selected_pointclouds_pred_augmented, selected_fwf_pointclouds_pred_augmented, full_pathlist[13], capsel, growsel, eliminated_features)
         combined_metrics_all_cleaned, combined_metrics_all_pred_cleaned, dropped_cols = preprocessing.drop_nan_columns(combined_metrics_all, combined_metrics_all_pred)
         logging.info("Dropped columns indices: %s", dropped_cols)
         feature_names_cleaned = [name for i, name in enumerate(feature_names) if i not in dropped_cols]
         logging.info("New shape of combined_metrics_all: %s", combined_metrics_all_cleaned.shape)
         logging.info("New shape of combined_metrics_all_pred: %s", combined_metrics_all_pred_cleaned.shape)
 
+        logging.info("Generating images...")
+        max_img_size_reg = preprocessing.get_maximum_unscaled_image_size(full_pathlist[6], full_pathlist[8])
+        preprocessing.generate_colored_images(netimgsize, full_pathlist[6], full_pathlist[8], max_crown_height, max_img_size_reg)
+        max_img_size_pred = preprocessing.get_maximum_unscaled_image_size(full_pathlist[10], full_pathlist[12])
+        preprocessing.generate_colored_images(netimgsize, full_pathlist[10], full_pathlist[12], max_crown_height_pred, max_img_size_pred)
+
+        selected_pointclouds_augmented, selected_fwf_pointclouds_augmented, selected_images_augmented = preprocessing.get_user_specified_data_fwf(full_pathlist[6], full_pathlist[7], full_pathlist[8], capsel, growsel)
+        selected_pointclouds_pred_augmented, selected_fwf_pointclouds_pred_augmented, selected_images_pred_augmented = preprocessing.get_user_specified_data_fwf(full_pathlist[10], full_pathlist[11], full_pathlist[12], capsel, growsel)
+
         logging.info("Collecting image data...")
         images_frontal, images_sideways = preprocessing.match_images_with_pointclouds(selected_pointclouds_augmented, selected_images_augmented)
         images_frontal_pred, images_sideways_pred = preprocessing.match_images_with_pointclouds(selected_pointclouds_pred_augmented, selected_images_pred_augmented)
-        images_front = np.asarray(images_frontal)
-        images_side = np.asarray(images_sideways)
-        images_front_pred = np.asarray(images_frontal_pred)
-        images_side_pred = np.asarray(images_sideways_pred)
+        images_front = np.asarray(images_frontal, dtype=np.float32)
+        images_side = np.asarray(images_sideways, dtype=np.float32)
+        images_front_pred = np.asarray(images_frontal_pred, dtype=np.float32)
+        images_side_pred = np.asarray(images_sideways_pred, dtype=np.float32)
+        print(images_front.shape, images_side.shape, images_front_pred.shape, images_side_pred.shape)
 
         logging.info("Creating final Training-, Validation- and Test-Set...")
         X_pc_train, X_pc_val, X_pc_pred, X_metrics_train, X_metrics_val, X_metrics_pred, X_img_1_train, X_img_1_val, X_img_1_pred, X_img_2_train, X_img_2_val, X_img_2_pred, y_train, y_val, y_pred, num_classes, label_dict = preprocessing.generate_training_data(capsel, growsel, selected_pointclouds_augmented, resampled_pointclouds, selected_pointclouds_pred_augmented, resampled_pointclouds_pred, combined_metrics_all_cleaned, combined_metrics_all_pred_cleaned, images_front, images_side, images_front_pred, images_side_pred, ssstest, full_pathlist[9], full_pathlist[13], 0.008, feature_names_cleaned)
@@ -122,6 +129,7 @@ def preprocess_data(full_pathlist, ssstest, capsel, growsel, elimper, maxpcscale
     else:
         logging.info("Creating Test-Set and removing underrepresented species...")
         if workspace_setup.files_extracted(full_pathlist[7]) == 0:
+            preprocessing.remove_insufficient_pointclouds(full_pathlist[4], netpcsize*0.75)
             species_distribution = preprocessing.eliminate_unused_species(full_pathlist[4], elimper, netpcsize)
             preprocessing.move_pointclouds_to_preds(full_pathlist[4], full_pathlist[7])
         else:
@@ -139,10 +147,6 @@ def preprocess_data(full_pathlist, ssstest, capsel, growsel, elimper, maxpcscale
         preprocessing.augment_selection(unaugmented_regular_pointclouds, maxpcscale, full_pathlist[4], species_distribution)
         preprocessing.augment_selection(unaugmented_regular_pred_pointclouds, maxpcscale, full_pathlist[7], species_distribution)
 
-        logging.info("Generating images...")
-        preprocessing.generate_colored_images(netimgsize, full_pathlist[4], full_pathlist[5])
-        preprocessing.generate_colored_images(netimgsize, full_pathlist[7], full_pathlist[8])
-
         logging.info("Resampling point clouds using FPS...")
         selected_pointclouds_augmented, selected_images_augmented = preprocessing.get_user_specified_data(full_pathlist[4], full_pathlist[5], capsel, growsel)
         selected_pointclouds_pred_augmented, selected_images_pred_augmented = preprocessing.get_user_specified_data(full_pathlist[7], full_pathlist[8], capsel, growsel)
@@ -154,21 +158,31 @@ def preprocess_data(full_pathlist, ssstest, capsel, growsel, elimper, maxpcscale
         resampled_pointclouds_pred = np.array([preprocessing.resample_pointcloud(centered_points_pred, netpcsize, i) for i in range(len(centered_points_pred))])
 
         logging.info("Generating metrics for point clouds...")
-        combined_metrics_all, feature_names, eliminated_features = preprocessing.generate_metrics_for_selected_pointclouds(selected_pointclouds_augmented, full_pathlist[6], capsel, growsel, [])
-        combined_metrics_all_pred, feature_names_pred, elim_features_pred = preprocessing.generate_metrics_for_selected_pointclouds(selected_pointclouds_pred_augmented, full_pathlist[9], capsel, growsel, eliminated_features)
+        combined_metrics_all, feature_names, eliminated_features, max_crown_height = preprocessing.generate_metrics_for_selected_pointclouds(selected_pointclouds_augmented, full_pathlist[6], capsel, growsel, [])
+        combined_metrics_all_pred, feature_names_pred, elim_features_pred, max_crown_height_pred = preprocessing.generate_metrics_for_selected_pointclouds(selected_pointclouds_pred_augmented, full_pathlist[9], capsel, growsel, eliminated_features)
         combined_metrics_all_cleaned, combined_metrics_all_pred_cleaned, dropped_cols = preprocessing.drop_nan_columns(combined_metrics_all, combined_metrics_all_pred)
         logging.info("Dropped columns indices: %s", dropped_cols)
         feature_names_cleaned = [name for i, name in enumerate(feature_names) if i not in dropped_cols]
         logging.info("New shape of combined_metrics_all: %s", combined_metrics_all_cleaned.shape)
         logging.info("New shape of combined_metrics_all_pred: %s", combined_metrics_all_pred_cleaned.shape)
 
+        logging.info("Generating images...")
+        max_img_size_reg = preprocessing.get_maximum_unscaled_image_size(full_pathlist[4], full_pathlist[5])
+        preprocessing.generate_colored_images(netimgsize, full_pathlist[4], full_pathlist[5], max_crown_height, max_img_size_reg)
+        max_img_size_pred = preprocessing.get_maximum_unscaled_image_size(full_pathlist[7], full_pathlist[8])
+        preprocessing.generate_colored_images(netimgsize, full_pathlist[7], full_pathlist[8], max_crown_height_pred, max_img_size_pred)
+
+        selected_pointclouds_augmented, selected_images_augmented = preprocessing.get_user_specified_data(full_pathlist[4], full_pathlist[5], capsel, growsel)
+        selected_pointclouds_pred_augmented, selected_images_pred_augmented = preprocessing.get_user_specified_data(full_pathlist[7], full_pathlist[8], capsel, growsel)
+
         logging.info("Collecting image data...")
         images_frontal, images_sideways = preprocessing.match_images_with_pointclouds(selected_pointclouds_augmented, selected_images_augmented)
         images_frontal_pred, images_sideways_pred = preprocessing.match_images_with_pointclouds(selected_pointclouds_pred_augmented, selected_images_pred_augmented)
-        images_front = np.asarray(images_frontal)
-        images_side = np.asarray(images_sideways)
-        images_front_pred = np.asarray(images_frontal_pred)
-        images_side_pred = np.asarray(images_sideways_pred)
+        images_front = np.asarray(images_frontal, dtype=np.float32)
+        images_side = np.asarray(images_sideways, dtype=np.float32)
+        images_front_pred = np.asarray(images_frontal_pred, dtype=np.float32)
+        images_side_pred = np.asarray(images_sideways_pred, dtype=np.float32)
+        print(images_front.shape, images_side.shape, images_front_pred.shape, images_side_pred.shape)
 
         logging.info("Creating final Training-, Validation- and Test-Set...")
         X_pc_train, X_pc_val, X_pc_pred, X_metrics_train, X_metrics_val, X_metrics_pred, X_img_1_train, X_img_1_val, X_img_1_pred, X_img_2_train, X_img_2_val, X_img_2_pred, y_train, y_val, y_pred, num_classes, label_dict = preprocessing.generate_training_data(capsel, growsel, selected_pointclouds_augmented, resampled_pointclouds, selected_pointclouds_pred_augmented, resampled_pointclouds_pred, combined_metrics_all_cleaned, combined_metrics_all_pred_cleaned, images_front, images_side, images_front_pred, images_side_pred, ssstest, full_pathlist[6], full_pathlist[9], 0.008, feature_names_cleaned)

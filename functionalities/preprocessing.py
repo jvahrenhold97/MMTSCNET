@@ -19,6 +19,35 @@ import logging
 from functionalities import workspace_setup
 from collections import defaultdict
 import shutil
+from scipy.spatial import ConvexHull
+from sklearn.decomposition import PCA
+from scipy.stats import entropy
+import matplotlib.colors as mcolors
+
+def remove_insufficient_pointclouds_fwf(reg_pc_folder, fwf_pc_folder, netpcsize):
+    for pointcloud in os.listdir(reg_pc_folder):
+        reg_id = pointcloud.split("_")[0]
+        reg_species = pointcloud.split("_")[2]
+        for fwf_pointcloud in os.listdir(fwf_pc_folder):
+            fwf_id = fwf_pointcloud.split("_")[0]
+            fwf_species = fwf_pointcloud.split("_")[2]
+            if reg_id == fwf_id and reg_species == fwf_species:
+                file_path = os.path.join(reg_pc_folder, pointcloud)
+                las_file = lp.read(file_path)
+                points = np.vstack((las_file.x, las_file.y, las_file.z)).transpose()
+                if len(points) < netpcsize:
+                    logging.info("Found pointcloud with %s/%s points. Removing it!", len(points), netpcsize)
+                    os.remove(os.path.join(reg_pc_folder, pointcloud))
+                    os.remove(os.path.join(fwf_pc_folder, fwf_pointcloud))
+
+def remove_insufficient_pointclouds(reg_pc_folder, netpcsize):
+    for pointcloud in os.listdir(reg_pc_folder):
+        file_path = os.path.join(reg_pc_folder, pointcloud)
+        las_file = lp.read(file_path)
+        points = np.vstack((las_file.x, las_file.y, las_file.z)).transpose()
+        if len(points) < netpcsize:
+            logging.info("Found pointcloud with %s/%s points. Removing it!", len(points), netpcsize)
+            os.remove(os.path.join(reg_pc_folder, pointcloud))
 
 def eliminate_unused_species_fwf(reg_pc_folder, fwf_pc_folder, elimination_percentage, netpcsize):
     pointclouds = select_pointclouds(reg_pc_folder)
@@ -487,7 +516,32 @@ def save_point_cloud(file_path, orig_las_file, outFile):
         outFile.intensity = orig_las_file.intensity.copy()
         outFile.write(file_path)
 
-def generate_colored_images(IMG_SIZE, las_working_folder, img_working_folder):
+def get_maximum_unscaled_image_size(las_working_folder, img_working_folder):
+    """
+    Main utility function for the generation of colored depth images.
+
+    Args:
+    IMG_SIZE: User-specified network input image size (224)
+    las_working_folder: Filepath to las point clouds.
+    img_working_folder: Savepath for generated images.
+    """
+    if get_colored_images_generated(las_working_folder, img_working_folder) == False:
+        image_sizes = []
+        for pointcloud in os.listdir(las_working_folder):
+            pointcloud_path = main_utils.join_paths(las_working_folder, pointcloud)
+            pc = lp.read(pointcloud_path)
+            voxels, abs_height = create_voxel_grid_from_las(pc)
+            vox_pos_list, max_img_size = get_voxel_positions(voxels)
+            zero_frontal_image, zero_sideways_image = create_empty_images(max_img_size)
+            frontal_image, sideways_image = fill_and_scale_empty_images(vox_pos_list, zero_frontal_image, zero_sideways_image)
+            max_image_size_before_padding = frontal_image.shape[0]
+            image_sizes.append(max_image_size_before_padding)
+        max_image_size = max(image_sizes)
+        return max_image_size
+    else:
+        return 0
+
+def generate_colored_images(IMG_SIZE, las_working_folder, img_working_folder, max_height, abs_max_img_size):
     """
     Main utility function for the generation of colored depth images.
 
@@ -508,11 +562,12 @@ def generate_colored_images(IMG_SIZE, las_working_folder, img_working_folder):
             ind_id = pointcloud.split("_")[5]
             leaf_cond = pointcloud.split("_")[6]
             augnum = pointcloud.split("_")[7].split(".")[0]
-            voxels = create_voxel_grid_from_las(pc)
+            voxels, abs_height = create_voxel_grid_from_las(pc)
             vox_pos_list, max_img_size = get_voxel_positions(voxels)
             zero_frontal_image, zero_sideways_image = create_empty_images(max_img_size)
             frontal_image, sideways_image = fill_and_scale_empty_images(vox_pos_list, zero_frontal_image, zero_sideways_image)
-            save_voxelized_pointcloud_images(IMG_SIZE, frontal_image, sideways_image, tree_id, species, method, date, ind_id, leaf_cond, img_working_folder, zero_frontal_image, str(pcid), augnum)
+            
+            save_voxelized_pointcloud_images(IMG_SIZE, frontal_image, sideways_image, tree_id, species, method, date, ind_id, leaf_cond, img_working_folder, zero_frontal_image, str(pcid), augnum, abs_max_img_size)
             pcid+=1
             logging.info("Generated frontal and sideways views of point cloud %s!", pcid)
     else:
@@ -558,7 +613,8 @@ def create_voxel_grid_from_las(pointcloud):
     R = pcd_las_o3d.get_rotation_matrix_from_xyz((-1.5, 0, 0))
     pcd_las_o3d.rotate(R, center=(0, 0, 0))
     vox_grid = o3d.geometry.VoxelGrid.create_from_point_cloud(pcd_las_o3d, voxel_size=0.03)
-    return vox_grid
+    absolute_height = np.max(points[:, 2]) - np.min(points[:, 2])
+    return vox_grid, absolute_height
 
 def get_voxel_positions(voxel_grid):
     """
@@ -577,6 +633,7 @@ def get_voxel_positions(voxel_grid):
         voxel_position_list.append(voxel.grid_index.tolist())
     maximum_grid_index = np.max(voxel_position_list)
     maximum_image_size = maximum_grid_index + 3
+    logging.debug("%s", maximum_image_size)
     return voxel_position_list, maximum_image_size
 
 def create_empty_images(maximum_image_size):
@@ -619,7 +676,7 @@ def fill_and_scale_empty_images(voxel_positions_list, empty_image_frontal, empty
     image_sideways = np.rot90(image_sideways, k=2, axes=(1,0))
     return image_frontal, image_sideways
 
-def pad_image(img, pad_t, pad_r, pad_b, pad_l):
+def pad_image(img, pad_t, pad_r, pad_l):
     """
     Pads an image around all sides by the given amount of rows/columns of zeros.
 
@@ -634,17 +691,17 @@ def pad_image(img, pad_t, pad_r, pad_b, pad_l):
     img: Padded image array.
     """
     height, width = img.shape
+    print("Image shape before padding:", img.shape)
     pad_left = np.zeros((height, int(pad_l)))
     img = np.concatenate((pad_left, img), axis = 1)
     pad_up = np.zeros((int(pad_t), int(pad_l) + width))
     img = np.concatenate((pad_up, img), axis = 0)
     pad_right = np.zeros((height + int(pad_t), int(pad_r)))
     img = np.concatenate((img, pad_right), axis = 1)
-    pad_bottom = np.zeros((int(pad_b), int(pad_l) + width + int(pad_r)))
-    img = np.concatenate((img, pad_bottom), axis = 0)
+    print("Image shape after padding:", img.shape)
     return img
 
-def center_image(img, empty_image_frontal):
+def center_image(img, abs_max_img_size):
     """
     Crops and image to the contents bounding box and pads it to square dimensions.
 
@@ -660,13 +717,14 @@ def center_image(img, empty_image_frontal):
     y1, y2 = row_sum[0][0], row_sum[0][-1]
     x1, x2 = col_sum[0][0], col_sum[0][-1]
     cropped_image = img[y1:y2, x1:x2]
-    zero_axis_fill = (empty_image_frontal.shape[0] - cropped_image.shape[0])
-    one_axis_fill = (empty_image_frontal.shape[1] - cropped_image.shape[1])
-    top = zero_axis_fill / 2
-    bottom = zero_axis_fill - top
+    zero_axis_fill = (abs_max_img_size - cropped_image.shape[0])
+    one_axis_fill = (abs_max_img_size - cropped_image.shape[1])
+    top = zero_axis_fill
     left = one_axis_fill / 2
     right = one_axis_fill - left
-    padded_image = pad_image(cropped_image, top, left, bottom, right)
+    print("Copped image shape:", cropped_image.shape)
+    padded_image = pad_image(cropped_image, top, left, right)
+    print("Padded image shape:", padded_image.shape)
     return padded_image
 
 def save_colored_image(image, id, species, method, date, ind_id, leaf_cond, angle, pcid, augnum, SAVE_DIR):
@@ -687,13 +745,14 @@ def save_colored_image(image, id, species, method, date, ind_id, leaf_cond, angl
     SAVE_DIR: Savepath for the image.
 
     """
-    cmap = plt.cm.gist_stern
+    colors = [(0, 0, 0)] + [plt.cm.jet(i / 255) for i in range(1, 256)]
+    custom_cmap = mcolors.ListedColormap(colors, name="custom_black_blue_red_yellow")
     norm = plt.Normalize(vmin=image.min(), vmax=image.max())
-    image = cmap(norm(image))
+    image = custom_cmap(norm(image))
     save_path = os.path.join(SAVE_DIR + "/" + str(id) + "_" + species + "_" + method + "_" + date + "_" + str(ind_id) + "_" + leaf_cond + "_" + angle + "_" + pcid + "_" + augnum + ".tiff")
     plt.imsave(save_path, image)
     
-def save_voxelized_pointcloud_images(IMG_SIZE, image_frontal, image_sideways, id, species, method, date, ind_id, leaf_cond, SAVE_DIR, empty_image_frontal, pointcloud_id, augmentation_number):
+def save_voxelized_pointcloud_images(IMG_SIZE, image_frontal, image_sideways, id, species, method, date, ind_id, leaf_cond, SAVE_DIR, empty_image_frontal, pointcloud_id, augmentation_number, abs_max_img_size):
     """
     Main utility function for the saving of the colored depth images.
 
@@ -712,10 +771,13 @@ def save_voxelized_pointcloud_images(IMG_SIZE, image_frontal, image_sideways, id
     augnum: Augmentation number of the source point cloud.
     SAVE_DIR: Savepath for the image.
     """
-    image_frontal_to_save = center_image(image_frontal, empty_image_frontal)
+    print("Frontal image shape before centering:", image_frontal.shape)
+    image_frontal_to_save = center_image(image_frontal, abs_max_img_size)
+    print("Frontal image shape after centering:", image_frontal_to_save.shape)
     image_frontal_resized = cv2.resize(image_frontal_to_save, (IMG_SIZE, IMG_SIZE))
+    print("Frontal image shape after resizing:", image_frontal_resized.shape)
     save_colored_image(image_frontal_resized, id, species, method, date, ind_id, leaf_cond, "frontal", pointcloud_id, augmentation_number, SAVE_DIR)
-    image_sideways_to_save = center_image(image_sideways, empty_image_frontal)
+    image_sideways_to_save = center_image(image_sideways, abs_max_img_size)
     image_sideways_resized = cv2.resize(image_sideways_to_save, (IMG_SIZE, IMG_SIZE))
     save_colored_image(image_sideways_resized, id, species, method, date, ind_id, leaf_cond, "sideways", pointcloud_id, augmentation_number, SAVE_DIR)
     
@@ -1052,8 +1114,14 @@ def generate_metrics_for_selected_pointclouds_fwf(selected_pointclouds, filtered
                      "segdens1", "segdens2", "segdens3", "segdens4", "segdens5", "segdens6", "segdens7", "tree_height", "highest_branch", "lowest_branch", "longest_spread", "longest_cross_spread",
                      "equivalent_crown_diameter", "canopy_width_x", "canopy_width_y", "canopy_volume", "point_density", "lai", "canopy_closure", "crown_base_height", "std_dev_height",
                      "height_kurtosis", "height_skewness", "crown_area", "crown_perimeter", "crown_volume_to_height_ratio", "canopy_cover_fraction", "stem_volume", "canopy_base_height", "fwhm", "echo_width",
-                     "surface_area", "surface_to_volume_ratio", "avg_nn_dist", "fract_dimension", "bb_dims", "crown_shape_indices"]
+                     "surface_area", "surface_to_volume_ratio", "avg_nn_dist", "fract_dimension", "bb_dims", "crown_shape_indices",
+                     "convex_hull_compactness", "gini_height", "canopy_porosity", "lambda_1_2", "lambda_2_3",
+                     "linearity", "planarity", "sphericity", "branch_angle_variance", "curvature",
+                     "height_variation_coeff", "entropy_height", "leaf_inclination",
+                     "leaf_curvature", "anisotropy", "canopy_skewness", "canopy_kurtosis", "canopy_ellipticity",
+                     "branch_density"]
     df_metrics = pd.DataFrame(combined_metrics, columns=feature_names)
+    max_crown_height = df_metrics["crown_height"].max()
     if len(prev_elim_features) > 0:
         eliminated_features = prev_elim_features
         df_metrics_reduced = df_metrics.drop(columns=eliminated_features)
@@ -1062,14 +1130,14 @@ def generate_metrics_for_selected_pointclouds_fwf(selected_pointclouds, filtered
     else:
         correlation_matrix = df_metrics.corr().abs()
         upper_triangle = correlation_matrix.where(np.triu(np.ones(correlation_matrix.shape), k=1).astype(bool))
-        highly_correlated_features = [column for column in upper_triangle.columns if any(upper_triangle[column] > 0.9)]
+        highly_correlated_features = [column for column in upper_triangle.columns if any(upper_triangle[column] > 0.95)]
         eliminated_features = highly_correlated_features.copy()
         df_metrics_reduced = df_metrics.drop(columns=highly_correlated_features)
         selected_features = df_metrics_reduced.columns.tolist()
         logging.info(f"Removed {len(highly_correlated_features)} redundant features due to high correlation.")
         logging.info(f"Remaining features: {len(selected_features)}")
         combined_metrics = df_metrics_reduced.to_numpy()
-    return combined_metrics, selected_features, eliminated_features
+    return combined_metrics, selected_features, eliminated_features, max_crown_height
 
 def load_point_cloud_file(file_path):
     """
@@ -1129,6 +1197,7 @@ def compute_combined_metrics_fwf(points, las_file):
     else:
         intensities = None
     all_waveform_data = []
+    z_values = points[:, 2]
     for vlr in las_file.header.vlrs:
         if 99 < vlr.record_id < 355:
             waveform_bytes = vlr.record_data_bytes()
@@ -1179,6 +1248,22 @@ def compute_combined_metrics_fwf(points, las_file):
     fract_dimension = compute_fractal_dimension(points, k=2)
     bb_dims = compute_bounding_box_dimensions(points)
     crown_shape_indices = compute_crown_shape_indices(points)
+    convex_hull_compactness = compute_convex_hull_compactness(points)
+    gini_height = compute_gini_coefficient(z_values)
+    canopy_porosity = compute_canopy_porosity(points, canopy_volume)
+    lambda_1_2, lambda_2_3 = compute_eigenvalue_ratios(points)
+    linearity, planarity, sphericity = compute_linearity_planarity_sphericity(points)
+    branch_angle_variance = compute_branch_angle_distribution(points)
+    curvature = compute_curvature(points)
+    height_variation_coeff = compute_height_variation_coefficient(z_values)
+    entropy_height = compute_entropy_height_distribution(z_values)
+    branch_density = compute_branch_density_profile(points)
+    canopy_skewness = compute_canopy_skewness(points)
+    canopy_kurtosis = compute_canopy_kurtosis(points)
+    canopy_ellipticity = compute_canopy_ellipticity(points)
+    leaf_inclination = compute_leaf_inclination_angle_distribution(points)
+    leaf_curvature = compute_leaf_surface_curvature(points)
+    anisotropy = compute_point_cloud_anisotropy(points)
     metrics.extend([
         float(height_quantile_25), float(height_quantile_50), float(height_quantile_75),
         float(dens0), float(dens1), float(dens2), float(dens3), float(dens4), float(dens5), float(dens6), float(dens7), float(dens8), float(dens9),
@@ -1193,7 +1278,11 @@ def compute_combined_metrics_fwf(points, las_file):
         float(height_skewness), float(crown_area), float(crown_perimeter), float(crown_volume_to_height_ratio),
         float(canopy_cover_fraction), float(stem_volume), float(canopy_base_height), float(fwhm), float(echo_width),
         float(surface_area), float(surface_to_volume_ratio), float(avg_nn_dist), float(fract_dimension),
-        float(bb_dims), float(crown_shape_indices)
+        float(bb_dims), float(crown_shape_indices), float(convex_hull_compactness), float(gini_height), float(canopy_porosity), float(lambda_1_2), float(lambda_2_3),
+        float(linearity), float(planarity), float(sphericity), float(branch_angle_variance), float(curvature),
+        float(height_variation_coeff), float(entropy_height), float(leaf_inclination),
+        float(leaf_curvature), float(anisotropy), float(canopy_skewness), float(canopy_kurtosis), float(canopy_ellipticity),
+        float(branch_density)
     ])
     feature_names = ["height_quantile_25", "height_quantile_50", "height_quantile_75", "dens0", "dens1", "dens2", "dens3", "dens4", "dens5", "dens6", "dens7", "dens8", "dens9", "dec0",
                      "dec1", "dec2", "dec3", "dec4", "dec5", "dec6", "dec7", "dec8", "max_crown_diameter", "clustering_degree", "intensity_mean", "intensity_std", "intensity_skewness", "intensity_kurtosis", "mean_pulse_widths",
@@ -1201,7 +1290,12 @@ def compute_combined_metrics_fwf(points, las_file):
                      "segdens1", "segdens2", "segdens3", "segdens4", "segdens5", "segdens6", "segdens7", "tree_height", "highest_branch", "lowest_branch", "longest_spread", "longest_cross_spread",
                      "equivalent_crown_diameter", "canopy_width_x", "canopy_width_y", "canopy_volume", "point_density", "lai", "canopy_closure", "crown_base_height", "std_dev_height",
                      "height_kurtosis", "height_skewness", "crown_area", "crown_perimeter", "crown_volume_to_height_ratio", "canopy_cover_fraction", "stem_volume", "canopy_base_height", "fwhm", "echo_width",
-                     "surface_area", "surface_to_volume_ratio", "avg_nn_dist", "fract_dimension", "bb_dims", "crown_shape_indices"]
+                     "surface_area", "surface_to_volume_ratio", "avg_nn_dist", "fract_dimension", "bb_dims", "crown_shape_indices",
+                     "convex_hull_compactness", "gini_height", "canopy_porosity", "lambda_1_2", "lambda_2_3",
+                     "linearity", "planarity", "sphericity", "branch_angle_variance", "curvature",
+                     "height_variation_coeff", "entropy_height", "leaf_inclination",
+                     "leaf_curvature", "anisotropy", "canopy_skewness", "canopy_kurtosis", "canopy_ellipticity",
+                     "branch_density"]
     return metrics, feature_names
 
 def match_images_with_pointclouds(selected_pointclouds, selected_images):
@@ -1507,6 +1601,118 @@ def print_class_distribution(y_train, y_val, y_pred, onehot_to_label_dict):
 #---------             Numerical Features              ----------
 #---------          As described in my thesis          ----------
 #----------------------------------------------------------------
+
+def compute_first_last_return_intensity_ratio(waveform_data):
+    """Computes the ratio of first return intensity to last return intensity."""
+    if len(waveform_data) < 2:
+        return 0
+    return waveform_data[0] / waveform_data[-1] if waveform_data[-1] > 0 else 0
+
+def compute_leaf_inclination_angle_distribution(points):
+    """Estimates leaf inclination angles from normal vectors."""
+    from sklearn.decomposition import PCA
+    pca = PCA(n_components=3)
+    pca.fit(points)
+    vertical_vector = np.array([0, 0, 1])
+    inclination_angles = np.arccos(np.dot(pca.components_, vertical_vector))
+    return np.mean(inclination_angles)  # Average inclination angle
+
+def compute_leaf_surface_curvature(points):
+    """Computes surface curvature using local normal variations."""
+    curvature = np.linalg.norm(np.gradient(points, axis=0), axis=1).std()
+    return curvature
+
+def compute_point_cloud_anisotropy(points):
+    """Computes anisotropy of the point cloud using PCA eigenvalues."""
+    pca = PCA(n_components=3)
+    pca.fit(points)
+    eigenvalues = np.sort(pca.explained_variance_)[::-1]
+    return eigenvalues[0] / np.sum(eigenvalues)
+
+def compute_branch_density_profile(points, height_bins=10):
+    """Computes the vertical distribution of branches using height bins."""
+    z_values = points[:, 2]
+    hist, _ = np.histogram(z_values, bins=height_bins)
+    return np.mean(hist / np.sum(hist))  # Normalize densities
+
+def compute_canopy_skewness(points):
+    """Computes the skewness of canopy height distribution."""
+    z_values = points[:, 2]
+    return np.mean((z_values - np.mean(z_values))**3) / (np.std(z_values)**3 + 1e-8)
+
+def compute_canopy_kurtosis(points):
+    """Computes the kurtosis of canopy height distribution."""
+    z_values = points[:, 2]
+    return np.mean((z_values - np.mean(z_values))**4) / (np.std(z_values)**4 + 1e-8)
+
+def compute_canopy_ellipticity(points):
+    """Computes the ellipticity of the canopy shape."""
+    canopy_points = points[:, :2]  # Extract XY plane
+    hull = ConvexHull(canopy_points)
+    bbox_dims = np.ptp(canopy_points, axis=0)
+    return bbox_dims[0] / bbox_dims[1] if bbox_dims[1] > 0 else 1
+
+def compute_convex_hull_compactness(points):
+    """Computes the ratio of Convex Hull volume to Bounding Box volume."""
+    hull = ConvexHull(points)
+    bbox_volume = np.prod(np.ptp(points, axis=0))
+    return hull.volume / bbox_volume if bbox_volume > 0 else 0
+
+def compute_gini_coefficient(z_values):
+    """Computes the Gini coefficient for height distribution."""
+    sorted_z = np.sort(z_values)
+    n = len(z_values)
+    cum_z = np.cumsum(sorted_z, dtype=float)
+    return (2.0 * np.sum((np.arange(1, n+1) * sorted_z))) / (n * np.sum(sorted_z)) - (n + 1) / n
+
+def compute_canopy_porosity(points, canopy_volume):
+    """Computes canopy porosity as the ratio of empty space to total volume."""
+    point_density = len(points) / canopy_volume if canopy_volume > 0 else 0
+    return 1 - point_density
+
+def compute_eigenvalue_ratios(points):
+    """Computes eigenvalue ratios λ1/λ2 and λ2/λ3 using PCA."""
+    pca = PCA(n_components=3)
+    pca.fit(points)
+    eigenvalues = pca.explained_variance_
+    lambda_1_2 = eigenvalues[0] / eigenvalues[1] if eigenvalues[1] > 0 else 0
+    lambda_2_3 = eigenvalues[1] / eigenvalues[2] if eigenvalues[2] > 0 else 0
+    return lambda_1_2, lambda_2_3
+
+def compute_linearity_planarity_sphericity(points):
+    """Computes Linearity, Planarity, and Sphericity from PCA eigenvalues."""
+    pca = PCA(n_components=3)
+    pca.fit(points)
+    eigenvalues = np.sort(pca.explained_variance_)[::-1]
+    linearity = (eigenvalues[0] - eigenvalues[1]) / eigenvalues[0] if eigenvalues[0] > 0 else 0
+    planarity = (eigenvalues[1] - eigenvalues[2]) / eigenvalues[0] if eigenvalues[0] > 0 else 0
+    sphericity = eigenvalues[2] / eigenvalues[0] if eigenvalues[0] > 0 else 0
+    return linearity, planarity, sphericity
+
+def compute_branch_angle_distribution(points):
+    """Computes the distribution of branch angles in cylindrical coordinates."""
+    angles = np.arctan2(points[:, 1], points[:, 0])  # Compute azimuth angles
+    return np.var(angles)  # Variance in branch angles
+
+def compute_curvature(points):
+    """Computes curvature based on the Laplacian smoothing factor."""
+    curvature = np.linalg.norm(np.gradient(points, axis=0), axis=1).mean()
+    return curvature
+
+def compute_height_variation_coefficient(z_values):
+    """Computes the Height Variation Coefficient (HVC)."""
+    return np.std(z_values) / np.mean(z_values) if np.mean(z_values) > 0 else 0
+
+def compute_entropy_height_distribution(z_values, bins=10):
+    """Computes entropy of height distribution."""
+    hist, _ = np.histogram(z_values, bins=bins, density=True)
+    return entropy(hist + 1e-10)  # Avoid log(0) issue
+
+def compute_waveform_echo_ratio(waveform_data):
+    """Computes the ratio of first to last return intensities."""
+    if len(waveform_data) < 2:
+        return 0
+    return waveform_data[0] / waveform_data[-1] if waveform_data[-1] > 0 else 0
 
 def compute_bounding_box_dimensions(points):
     min_coords = np.min(points, axis=0)
@@ -1981,8 +2187,13 @@ def generate_metrics_for_selected_pointclouds(selected_pointclouds, metrics_dir,
                      "segdens1", "segdens2", "segdens3", "segdens4", "segdens5", "segdens6", "segdens7", "tree_height", "highest_branch", "lowest_branch", "longest_spread", "longest_cross_spread",
                      "equivalent_crown_diameter", "canopy_width_x", "canopy_width_y", "canopy_volume", "point_density", "lai", "canopy_closure", "crown_base_height", "std_dev_height",
                      "height_kurtosis", "height_skewness", "crown_area", "crown_perimeter", "crown_volume_to_height_ratio", "canopy_cover_fraction", "stem_volume", "canopy_base_height",
-                     "surface_area", "surface_to_volume_ratio", "avg_nn_dist", "fract_dimension", "bb_dims", "crown_shape_indices"]
+                     "surface_area", "surface_to_volume_ratio", "avg_nn_dist", "fract_dimension", "bb_dims", "crown_shape_indices",
+                     "convex_hull_compactness", "gini_height", "canopy_porosity", "lambda_1_2", "lambda_2_3",
+                     "linearity", "planarity", "sphericity", "branch_angle_variance", "curvature",
+                     "height_variation_coeff", "entropy_height", "leaf_inclination",
+                     "leaf_curvature", "anisotropy", "canopy_skewness", "canopy_kurtosis", "canopy_ellipticity", "branch_density"]
     df_metrics = pd.DataFrame(combined_metrics, columns=feature_names)
+    max_crown_height = df_metrics["crown_height"].max()
     if len(prev_elim_features) > 0:
         eliminated_features = prev_elim_features
         df_metrics_reduced = df_metrics.drop(columns=eliminated_features)
@@ -1998,7 +2209,7 @@ def generate_metrics_for_selected_pointclouds(selected_pointclouds, metrics_dir,
         logging.info(f"Remaining features: {len(selected_features)}")
         combined_metrics = df_metrics_reduced.to_numpy()
         eliminated_features = highly_correlated_features.copy()
-    return combined_metrics, selected_features, eliminated_features
+    return combined_metrics, selected_features, eliminated_features, max_crown_height
 
 def compute_combined_metrics(points):
     """
@@ -2011,6 +2222,7 @@ def compute_combined_metrics(points):
     metrics: List of numerical features for the point cloud.
     """
     metrics = []
+    z_values = points[:, 2]
     height_quantile_25 = compute_height_quantile(points, 25)
     height_quantile_50 = compute_height_quantile(points, 50)
     height_quantile_75 = compute_height_quantile(points, 75)
@@ -2048,6 +2260,22 @@ def compute_combined_metrics(points):
     fract_dimension = compute_fractal_dimension(points, k=2)
     bb_dims = compute_bounding_box_dimensions(points)
     crown_shape_indices = compute_crown_shape_indices(points)
+    convex_hull_compactness = compute_convex_hull_compactness(points)
+    gini_height = compute_gini_coefficient(z_values)
+    canopy_porosity = compute_canopy_porosity(points, canopy_volume)
+    lambda_1_2, lambda_2_3 = compute_eigenvalue_ratios(points)
+    linearity, planarity, sphericity = compute_linearity_planarity_sphericity(points)
+    branch_angle_variance = compute_branch_angle_distribution(points)
+    curvature = compute_curvature(points)
+    height_variation_coeff = compute_height_variation_coefficient(z_values)
+    entropy_height = compute_entropy_height_distribution(z_values)
+    branch_density = compute_branch_density_profile(points)
+    canopy_skewness = compute_canopy_skewness(points)
+    canopy_kurtosis = compute_canopy_kurtosis(points)
+    canopy_ellipticity = compute_canopy_ellipticity(points)
+    leaf_inclination = compute_leaf_inclination_angle_distribution(points)
+    leaf_curvature = compute_leaf_surface_curvature(points)
+    anisotropy = compute_point_cloud_anisotropy(points)
     metrics.extend([
         float(height_quantile_25), float(height_quantile_50), float(height_quantile_75),
         float(dens0), float(dens1), float(dens2), float(dens3), float(dens4), float(dens5), float(dens6), float(dens7), float(dens8), float(dens9),
@@ -2059,14 +2287,23 @@ def compute_combined_metrics(points):
         float(canopy_width_x), float(canopy_width_y), float(canopy_volume), float(point_density), float(lai),
         float(canopy_closure), float(crown_base_height), float(std_dev_height), float(height_kurtosis),
         float(height_skewness), float(crown_area), float(crown_perimeter), float(crown_volume_to_height_ratio),
-        float(canopy_cover_fraction), float(stem_volume), float(canopy_base_height), float(surface_area),
-        float(surface_to_volume_ratio), float(avg_nn_dist), float(fract_dimension),
-        float(bb_dims), float(crown_shape_indices)
+        float(canopy_cover_fraction), float(stem_volume), float(canopy_base_height),
+        float(surface_area), float(surface_to_volume_ratio), float(avg_nn_dist), float(fract_dimension),
+        float(bb_dims), float(crown_shape_indices), float(convex_hull_compactness), float(gini_height), float(canopy_porosity), float(lambda_1_2), float(lambda_2_3),
+        float(linearity), float(planarity), float(sphericity), float(branch_angle_variance), float(curvature),
+        float(height_variation_coeff), float(entropy_height), float(leaf_inclination),
+        float(leaf_curvature), float(anisotropy), float(canopy_skewness), float(canopy_kurtosis), float(canopy_ellipticity),
+        float(branch_density)
     ])
     feature_names = ["height_quantile_25", "height_quantile_50", "height_quantile_75", "dens0", "dens1", "dens2", "dens3", "dens4", "dens5", "dens6", "dens7", "dens8", "dens9", "dec0",
                      "dec1", "dec2", "dec3", "dec4", "dec5", "dec6", "dec7", "dec8", "max_crown_diameter", "clustering_degree", "max_height", "crown_height", "crown_volume", "segdens0",
                      "segdens1", "segdens2", "segdens3", "segdens4", "segdens5", "segdens6", "segdens7", "tree_height", "highest_branch", "lowest_branch", "longest_spread", "longest_cross_spread",
                      "equivalent_crown_diameter", "canopy_width_x", "canopy_width_y", "canopy_volume", "point_density", "lai", "canopy_closure", "crown_base_height", "std_dev_height",
                      "height_kurtosis", "height_skewness", "crown_area", "crown_perimeter", "crown_volume_to_height_ratio", "canopy_cover_fraction", "stem_volume", "canopy_base_height",
-                     "surface_area", "surface_to_volume_ratio", "avg_nn_dist", "fract_dimension", "bb_dims", "crown_shape_indices"]
+                     "surface_area", "surface_to_volume_ratio", "avg_nn_dist", "fract_dimension", "bb_dims", "crown_shape_indices",
+                     "convex_hull_compactness", "gini_height", "canopy_porosity", "lambda_1_2", "lambda_2_3",
+                     "linearity", "planarity", "sphericity", "branch_angle_variance", "curvature",
+                     "height_variation_coeff", "entropy_height", "leaf_inclination",
+                     "leaf_curvature", "anisotropy", "canopy_skewness", "canopy_kurtosis", "canopy_ellipticity", "branch_density"]
+
     return metrics, feature_names

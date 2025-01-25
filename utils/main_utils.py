@@ -35,8 +35,8 @@ def parse_arguments():
                         help='Threshold percentage which defines which tree species should not be included based on their representation percentage. Range: [0 - 99]',
                         type=float, default=5.0)
     parser.add_argument('--maxpcscale',
-                        help='Maximum scaling to apply when augmenting pointclouds. Range: [0.001 - 0.01]',
-                        type=float, default=0.005)
+                        help='Maximum scaling to apply when augmenting pointclouds. Range: [0.001 - 0.05]',
+                        type=float, default=0.05)
     parser.add_argument('--ssstest',
                         help='Ratio for validation data. Range: [0.05 - 0.5]',
                         type=float, default=0.20)
@@ -87,9 +87,9 @@ def validate_inputs(datadir, workdir, modeldir, elimper, maxpcscale, ssstest, ca
     else:
         logging.error("Elimination percentage can not be 100 or higher! Exiting now!")
         sys.exit(1)
-    if maxpcscale > 0.001 and maxpcscale < 0.01:
+    if maxpcscale > 0.001 and maxpcscale < 0.051:
         max_pcscale = maxpcscale
-    elif maxpcscale < 0.001 or maxpcscale > 0.01:
+    elif maxpcscale < 0.001 or maxpcscale > 0.051:
         logging.error("Scaling factor is too small/large! Exiting now!")
         sys.exit(1)
     if ssstest > 0.05 and ssstest < 0.5:
