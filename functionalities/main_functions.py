@@ -1,4 +1,4 @@
-from functionalities import workspace_setup, preprocessing, model_utils
+from functionalities import workspace_setup, preprocessing, model_utils, predef_mmtscnet
 import numpy as np
 import os
 import tensorflow as tf
@@ -7,6 +7,7 @@ import gc
 import time
 from keras_tuner import BayesianOptimization, Objective
 from keras.callbacks import ReduceLROnPlateau, LearningRateScheduler
+import keras
 
 def extract_data(data_dir, work_dir, fwf_av, capsel, growsel):
     """
@@ -89,12 +90,9 @@ def preprocess_data(full_pathlist, ssstest, capsel, growsel, elimper, maxpcscale
         logging.info("Resampling point clouds using FPS...")
         selected_pointclouds_augmented, selected_fwf_pointclouds_augmented, selected_images_augmented = preprocessing.get_user_specified_data_fwf(full_pathlist[6], full_pathlist[7], full_pathlist[8], capsel, growsel)
         selected_pointclouds_pred_augmented, selected_fwf_pointclouds_pred_augmented, selected_images_pred_augmented = preprocessing.get_user_specified_data_fwf(full_pathlist[10], full_pathlist[11], full_pathlist[12], capsel, growsel)
-        pointclouds_for_resampling = [preprocessing.load_point_cloud(file) for file in selected_pointclouds_augmented]
-        centered_points = preprocessing.center_point_cloud(pointclouds_for_resampling)
-        resampled_pointclouds = np.array([preprocessing.resample_pointcloud(centered_points, netpcsize, i) for i in range(len(centered_points))])
-        pointclouds_pred_for_resampling = [preprocessing.load_point_cloud(file_pred) for file_pred in selected_pointclouds_pred_augmented]
-        centered_points_pred = preprocessing.center_point_cloud(pointclouds_pred_for_resampling)
-        resampled_pointclouds_pred = np.array([preprocessing.resample_pointcloud(centered_points_pred, netpcsize, i) for i in range(len(centered_points_pred))])
+        
+        resampled_pointclouds = preprocessing.resample_pointclouds_fps(selected_pointclouds_augmented, netpcsize)
+        resampled_pointclouds_pred = preprocessing.resample_pointclouds_fps(selected_pointclouds_pred_augmented, netpcsize)
 
         logging.info("Generating metrics for point clouds...")
         combined_metrics_all, feature_names, eliminated_features, max_crown_height = preprocessing.generate_metrics_for_selected_pointclouds_fwf(selected_pointclouds_augmented, selected_fwf_pointclouds_augmented, full_pathlist[9], capsel, growsel, [])
@@ -150,12 +148,9 @@ def preprocess_data(full_pathlist, ssstest, capsel, growsel, elimper, maxpcscale
         logging.info("Resampling point clouds using FPS...")
         selected_pointclouds_augmented, selected_images_augmented = preprocessing.get_user_specified_data(full_pathlist[4], full_pathlist[5], capsel, growsel)
         selected_pointclouds_pred_augmented, selected_images_pred_augmented = preprocessing.get_user_specified_data(full_pathlist[7], full_pathlist[8], capsel, growsel)
-        pointclouds_for_resampling = [preprocessing.load_point_cloud(file) for file in selected_pointclouds_augmented]
-        centered_points = preprocessing.center_point_cloud(pointclouds_for_resampling)
-        resampled_pointclouds = np.array([preprocessing.resample_pointcloud(centered_points, netpcsize, i) for i in range(len(centered_points))])
-        pointclouds_pred_for_resampling = [preprocessing.load_point_cloud(file_pred) for file_pred in selected_pointclouds_pred_augmented]
-        centered_points_pred = preprocessing.center_point_cloud(pointclouds_pred_for_resampling)
-        resampled_pointclouds_pred = np.array([preprocessing.resample_pointcloud(centered_points_pred, netpcsize, i) for i in range(len(centered_points_pred))])
+
+        resampled_pointclouds = preprocessing.resample_pointclouds_fps(selected_pointclouds_augmented, netpcsize)
+        resampled_pointclouds_pred = preprocessing.resample_pointclouds_fps(selected_pointclouds_pred_augmented, netpcsize)
 
         logging.info("Generating metrics for point clouds...")
         combined_metrics_all, feature_names, eliminated_features, max_crown_height = preprocessing.generate_metrics_for_selected_pointclouds(selected_pointclouds_augmented, full_pathlist[6], capsel, growsel, [])
@@ -220,8 +215,8 @@ def perform_hp_tuning(model_dir, X_pc_train, X_img_1_train, X_img_2_train, X_met
     image_shape = (netimgsize, netimgsize, 3)
     metrics_shape = (X_metrics_train.shape[1],)
     batch_size = bsize
-    num_hp_epochs = 7
-    num_hp_trials = 10
+    num_hp_epochs = 5
+    num_hp_trials = 7
     os.chdir(model_dir)
     # Clear the backend to free up memory
     tf.keras.backend.clear_session()
@@ -275,13 +270,15 @@ def perform_hp_tuning(model_dir, X_pc_train, X_img_1_train, X_img_2_train, X_met
                 callbacks=[reduce_lr, degrade_lr, macro_f1_callback, custom_scoring_callback])
     # Retrieve best hyperparameter configuration of the tuning process
     best_hyperparameters = tuner.get_best_hyperparameters(num_trials=1)[0]
+    logging.info(f"Best Hyperparameters: {best_hyperparameters}")
     optimal_learning_rate = best_hyperparameters.get('learning_rate')
-    print(f"Optimal Learning Rate: {optimal_learning_rate}")
+    logging.info(f"Optimal Learning Rate: {optimal_learning_rate}")
     # Create instance of MMTSCNet with optimal hyperparameters
     combined_model = model_utils.CombinedModel(point_cloud_shape, image_shape, metrics_shape, num_classes, netpcsize)
     untrained_model = combined_model.get_untrained_model(best_hyperparameters)
     untrained_model.summary()
     gc.collect()
+    keras.backend.clear_session()
     return untrained_model, optimal_learning_rate
 
 def perform_training(model, bsz, X_pc_train, X_img_1_train, X_img_2_train, X_metrics_train, y_train, X_pc_val, X_img_1_val, X_img_2_val, X_metrics_val, y_val, modeldir, label_dict, capsel, growsel, netpcsize, fwf_av, optimal_learning_rate):
@@ -311,7 +308,6 @@ def perform_training(model, bsz, X_pc_train, X_img_1_train, X_img_2_train, X_met
     Returns:
     trained_model: Keras model instance of the trained MMTSCNet.
     """
-    y_pred_val = y_val
     tf.keras.utils.set_random_seed(812)
     # Compilation of the tuned model with learning rate and training matrics
     model.compile(
@@ -324,7 +320,7 @@ def perform_training(model, bsz, X_pc_train, X_img_1_train, X_img_2_train, X_met
     model.summary()
     os.chdir(modeldir)
     # Cear backend to free up memory
-    tf.keras.backend.clear_session()
+    keras.backend.clear_session()
     # Data normalization and corruption check
     X_img_1_train, X_img_2_train, X_pc_train, X_metrics_train = model_utils.normalize_data(X_pc_train, X_img_1_train, X_img_2_train, X_metrics_train)
     X_img_1_val, X_img_2_val, X_pc_val, X_metrics_val = model_utils.normalize_data(X_pc_val, X_img_1_val, X_img_2_val, X_metrics_val)
@@ -373,13 +369,21 @@ def perform_training(model, bsz, X_pc_train, X_img_1_train, X_img_2_train, X_met
         model.save(model_file_path, save_format="keras")
     except:
         pass
-    # Prediction on validation data
-    predictions = model.predict([X_pc_val, X_img_1_val, X_img_2_val, X_metrics_val], batch_size=8, verbose=1)
     # Plotting of confusion matrix and training metrics
     model_utils.plot_best_epoch_metrics(history, plot_path)
     model.summary()
     # I/O ops
     model_path = model_utils.get_trained_model_folder(modeldir, capsel, growsel)
     trained_model = model_utils.load_trained_model_from_folder(model_path)
+    keras.backend.clear_session()
     gc.collect()
     return trained_model, plot_path
+
+def build_mmtscnet_with_optimal_hps(netpcsize, netimgsize, num_classes, cap_sel, grow_sel, fwf_av, X_metrics_train):
+    point_cloud_shape = (netpcsize, 3)
+    image_shape = (netimgsize, netimgsize, 3)
+    metrics_shape = (X_metrics_train.shape[1],)
+    best_hyperparameters = predef_mmtscnet.get_hyperparams_for_config(num_classes, cap_sel, grow_sel, fwf_av)
+    combined_model = model_utils.CombinedModel(point_cloud_shape, image_shape, metrics_shape, num_classes, netpcsize)
+    untrained_model = combined_model.get_untrained_model(best_hyperparameters)
+    untrained_model.summary()

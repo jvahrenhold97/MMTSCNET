@@ -4,6 +4,7 @@ import sys
 import time
 from utils import main_utils
 from functionalities import main_functions, model_utils
+import multiprocessing as mp
 
 def run_mmtscnet():
     """
@@ -23,8 +24,11 @@ def run_mmtscnet():
             workspace_paths = main_functions.extract_data(data_dir, work_dir, fwf_av, cap_sel, grow_sel)
             logging.info("Preprocessing data...")
             X_pc_train, X_pc_val, X_pc_pred, X_metrics_train, X_metrics_val, X_metrics_pred, X_img_1_train, X_img_1_val, X_img_1_pred, X_img_2_train, X_img_2_val, X_img_2_pred, y_train, y_val, y_pred, num_classes, label_dict = main_functions.preprocess_data(workspace_paths, sss_test, cap_sel, grow_sel, elim_per, max_pcscale, pc_size, img_size, fwf_av)
-            logging.info("Commencing hyperparameter-tuning...")
-            untrained_model, optimal_learning_rate = main_functions.perform_hp_tuning(model_dir, X_pc_train, X_img_1_train, X_img_2_train, X_metrics_train, y_train, X_pc_val, X_img_1_val, X_img_2_val, X_metrics_val, y_val, bsize, pc_size, img_size, num_classes, cap_sel, grow_sel, fwf_av)
+            if args.inference and grow_sel != "ALL" and cap_sel not in ["ALL", "TLS"]:
+                untrained_model, optimal_learning_rate = main_functions.build_mmtscnet_with_optimal_hps(pc_size, img_size, num_classes, cap_sel, grow_sel, fwf_av, X_metrics_train)
+            else:
+                logging.info("Commencing hyperparameter-tuning...")
+                untrained_model, optimal_learning_rate = main_functions.perform_hp_tuning(model_dir, X_pc_train, X_img_1_train, X_img_2_train, X_metrics_train, y_train, X_pc_val, X_img_1_val, X_img_2_val, X_metrics_val, y_val, bsize, pc_size, img_size, num_classes, cap_sel, grow_sel, fwf_av)
             logging.info("Training MMTSCNet...")
             trained_model, plot_path = main_functions.perform_training(untrained_model, bsize, X_pc_train, X_img_1_train, X_img_2_train, X_metrics_train, y_train, X_pc_val, X_img_1_val, X_img_2_val, X_metrics_val, y_val, model_dir, label_dict, cap_sel, grow_sel, pc_size, fwf_av, optimal_learning_rate)
             logging.info("Training finished, predicting...")
@@ -35,10 +39,13 @@ def run_mmtscnet():
             sys.exit(1)
     else:
         logging.exception("No NVIDIA GPU detected! Can't run MMTSCNet!")
+        time.sleep(3)
+        sys.exit(1)
 
 if __name__ == "__main__":
     """
     Runs the program.
 
     """
+    mp.set_start_method('spawn')
     run_mmtscnet()

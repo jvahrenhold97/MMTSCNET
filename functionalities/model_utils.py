@@ -2,7 +2,7 @@ import tensorflow as tf
 from keras.layers import Input, Conv1D, BatchNormalization, GlobalMaxPooling1D, Dense, Dropout, Concatenate, Reshape, ReLU, Add, Activation
 from keras.models import Model
 from keras.regularizers import L1L2
-from keras.applications import DenseNet201
+from keras.applications import DenseNet201, DenseNet121
 from keras.callbacks import Callback
 from sklearn.metrics import f1_score, confusion_matrix, precision_score, recall_score
 from keras.optimizers import Adam
@@ -17,8 +17,6 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import datetime
 import logging
-import laspy as lp
-import open3d as o3d
 import pandas as pd
 import keras.backend as K
 from keras.backend import sigmoid
@@ -29,14 +27,6 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 from keras import mixed_precision
 policy = mixed_precision.Policy('mixed_float16')
 mixed_precision.set_global_policy(policy)
-
-gpus = tf.config.list_physical_devices('GPU')
-if gpus:
-    try:
-        for gpu in gpus:
-            tf.config.experimental.set_memory_growth(gpu, True)
-    except RuntimeError as e:
-        print(e)
 
 def swish(x, beta = 1):
     return (x * sigmoid(beta * x))
@@ -224,36 +214,6 @@ def find_most_recent_file(directory, capsel, growsel):
             files.append(file)
     filepath = os.path.join(directory, files[0])
     return filepath
-
-def visualize_point_cloud_with_labels(laz_file):
-    """
-    Visualizes a classified point cloud using Open3D.
-
-    Args:
-    laz_file: Filepath of the classified plot point cloud.
-    """
-    # Read the .laz file
-    las = lp.read(laz_file)
-    # Extract points and labels
-    points = np.vstack((las.x, las.y, las.z)).transpose()
-    if 'predicted_label' not in las.point_format.dimension_names:
-        raise ValueError("The point cloud does not contain 'predicted_label' data")
-    labels = las.predicted_label
-    # Generate unique colors for each label
-    unique_labels = np.unique(labels)
-    colormap = plt.get_cmap("tab20", len(unique_labels))  # Using 'tab20' for distinct colors
-    color_map = {label: colormap(i)[:3] for i, label in enumerate(unique_labels)}
-    # Map colors to points
-    colors = np.array([color_map[label] for label in labels])
-    # Convert to Open3D point cloud
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(points)
-    pcd.colors = o3d.utility.Vector3dVector(colors)
-    # Visualize the point cloud
-    o3d.visualization.draw_geometries([pcd], window_name="Classification Visualization",
-                                      width=800, height=600, left=50, top=50,
-                                      point_show_normal=False, mesh_show_wireframe=False,
-                                      mesh_show_back_face=False)
     
 def create_label_mapping(onehot_to_label_dict):
     """
@@ -291,6 +251,7 @@ def predict_for_data(trained_model, X_pc_val, X_metrics_val, X_img_1_val, X_img_
     Returns:
     (Saved): A classified plot point cloud.
     """
+    keras.backend.clear_session()
     print("Min values of X_metrics_pred:", np.min(X_metrics_pred, axis=0))
     print("Max values of X_metrics_pred:", np.max(X_metrics_pred, axis=0))
     print("Columns where max == min:", np.where(np.min(X_metrics_pred, axis=0) == np.max(X_metrics_pred, axis=0))[0])
@@ -664,10 +625,10 @@ class PointCloudExtractor(tf.keras.layers.Layer):
     def build(self, input_shape):
         # === Hyperparameter Configuration ===
         num_conv1d = self.hp.Choice('pce_depth', [1, 2, 3, 4, 5])
-        hp_units = self.hp.Choice('pce_units', values=[256, 512, 1024])
-        hp_dropout_rate = self.hp.Float('pce_dropout_rate', min_value=0.025, max_value=0.2, step=0.025)
+        hp_units = self.hp.Choice('pce_units', values=[256, 384, 512, 768])
+        hp_dropout_rate = self.hp.Float('pce_dropout_rate', min_value=0.025, max_value=0.125, step=0.025)
         hp_regularizer = self.hp.Float('pce_regularization', min_value=0.0000001, max_value=0.0005, step=0.0000001)
-        hp_neighbors = self.hp.Int('pce_neighbors', min_value=16, max_value=128, step=16)
+        hp_neighbors = self.hp.Int('pce_neighbors', min_value=8, max_value=64, step=8)
 
         # === Multi-Scale Grouping Radii ===
         self.radii = [
@@ -678,23 +639,23 @@ class PointCloudExtractor(tf.keras.layers.Layer):
         self.msg_neighbors = hp_neighbors
 
         # === Feature Extraction Convolutions ===
-        self.conv1 = Conv1D(hp_units, 1, padding="same", kernel_regularizer=L1L2(l1=hp_regularizer, l2=hp_regularizer))
-        self.norm1 = BatchNormalization()
-        self.act1 = Activation('swish')
-        self.dropout1 = Dropout(hp_dropout_rate)
+        self.conv1 = Conv1D(hp_units, 1, padding="same", kernel_regularizer=L1L2(l1=hp_regularizer, l2=hp_regularizer), name="pce_conv_01")
+        self.norm1 = BatchNormalization(name="pce_bnorm_01")
+        self.act1 = Activation('swish', name="pce_swish_01")
+        self.dropout1 = Dropout(hp_dropout_rate, name="pce_dropout_01")
 
         self.conv_blocks = []
         for i in range(num_conv1d):
             filters = hp_units // (i + 1)
-            conv = Conv1D(filters, 1, padding='same', kernel_regularizer=L1L2(l1=hp_regularizer, l2=hp_regularizer))
-            norm = BatchNormalization()
-            act = Activation('swish')
-            dropout = Dropout(hp_dropout_rate)
+            conv = Conv1D(filters, 1, padding='same', kernel_regularizer=L1L2(l1=hp_regularizer, l2=hp_regularizer), name=f"pce_conv_b_{i}")
+            norm = BatchNormalization(name=f"pce_bnorm_b_{i}")
+            act = Activation('swish', name=f"pce_swish_b_{i}")
+            dropout = Dropout(hp_dropout_rate, name=f"pce_dropout_b_{i}")
             self.conv_blocks.append((conv, norm, act, dropout))
 
-        self.residual_conv = Conv1D(hp_units, 1, padding="same")
-        self.global_pool = GlobalMaxPooling1D()
-        self.global_norm = BatchNormalization()
+        self.residual_conv = Conv1D(hp_units, 1, padding="same", name="pce_conv_res_01")
+        self.global_pool = GlobalMaxPooling1D(name="pce_gmpool_01")
+        self.global_norm = BatchNormalization(name="pce_gnorm_01")
 
         self.transform = OrthogonalTNet(3, self.hp)
 
@@ -754,22 +715,22 @@ class OrthogonalTNet(tf.keras.layers.Layer):
         self.hp = hp
 
     def build(self, input_shape):
-        hp_units = self.hp.Choice('tnet_units', values=[32, 64, 128, 256, 512])
+        hp_units = self.hp.Choice('tnet_units', values=[32, 64, 128, 256])
         hp_reg = self.hp.Float('tnet_regularization', min_value=0.0000001, max_value=0.0005, step=0.0000001)
-        hp_dropout = self.hp.Float('tnet_dropout', min_value=0.025, max_value=0.2, step=0.025)
+        hp_dropout = self.hp.Float('tnet_dropout', min_value=0.025, max_value=0.125, step=0.025)
 
-        self.conv1 = Conv1D(hp_units, 1, kernel_regularizer=L1L2(l1=hp_reg, l2=hp_reg))
-        self.norm1 = BatchNormalization()
-        self.act1 = Activation('swish')
-        self.dropout1 = Dropout(hp_dropout)
+        self.conv1 = Conv1D(hp_units, 1, kernel_regularizer=L1L2(l1=hp_reg, l2=hp_reg), name="t_net_conv_01")
+        self.norm1 = BatchNormalization(name="t_net_bnorm_01")
+        self.act1 = Activation('swish', name="t_net_swish_01")
+        self.dropout1 = Dropout(hp_dropout, name="t_net_dropout_01")
 
-        self.global_pool = GlobalMaxPooling1D()
-        self.dense1 = Dense(hp_units, kernel_regularizer=L1L2(l1=hp_reg, l2=hp_reg))
-        self.norm2 = BatchNormalization()
-        self.act2 = Activation('swish')
-        self.dropout2 = Dropout(hp_dropout)
+        self.global_pool = GlobalMaxPooling1D(name="t_net_gmpool_01")
+        self.dense1 = Dense(hp_units, kernel_regularizer=L1L2(l1=hp_reg, l2=hp_reg), name="t_net_dense_01")
+        self.norm2 = BatchNormalization(name="t_net_bnorm_02")
+        self.act2 = Activation('swish', name="t_net_swish_02")
+        self.dropout2 = Dropout(hp_dropout, name="t_net_dropout_02")
 
-        self.dense2 = Dense(self.transform_size**2, activation='linear', bias_initializer='zeros')
+        self.dense2 = Dense(self.transform_size**2, activation='linear', bias_initializer='zeros', name="t_net_dense_02")
         self.reshape = tf.keras.layers.Reshape((self.transform_size, self.transform_size))
 
     def call(self, inputs):
@@ -791,7 +752,7 @@ class OrthogonalTNet(tf.keras.layers.Layer):
 
 class DenseNetModel(tf.keras.layers.Layer):
     """
-    MMTSCNet image processor (DenseNet201).
+    MMTSCNet image processor (DenseNet121).
 
     """
     def __init__(self, img_input_shape, **kwargs):
@@ -800,7 +761,7 @@ class DenseNetModel(tf.keras.layers.Layer):
 
     def build(self, input_shape):
         # Defintion of DenseNet201 without classifier
-        self.model = DenseNet201(include_top=False, input_shape=self.img_input_shape, pooling='avg')
+        self.model = DenseNet121(include_top=False, input_shape=self.img_input_shape, pooling='avg')
 
     def call(self, inputs):
         x = self.model(inputs)
@@ -829,8 +790,8 @@ class EnhancedMetricsModel(tf.keras.layers.Layer):
 
     def build(self, input_shape):
         # Hyperparameter Configuration
-        units = self.hp.Choice('metrics_units', values=[128, 256, 512, 1024])
-        dropout_rate = self.hp.Float('metrics_dropout_rate', min_value=0.025, max_value=0.2, step=0.025)
+        units = self.hp.Choice('metrics_units', values=[256, 512, 768])
+        dropout_rate = self.hp.Float('metrics_dropout_rate', min_value=0.025, max_value=0.125, step=0.025)
         regularization = self.hp.Float('metrics_regularization', min_value=0.0000001, max_value=0.0005, step=0.0000001)
 
         # === Define Layers in build() ===
@@ -861,20 +822,19 @@ class EnhancedMetricsModel(tf.keras.layers.Layer):
 
         super(EnhancedMetricsModel, self).build(input_shape)
 
-    def call(self, inputs, training=False):
+    def call(self, inputs):
         """
         Applies the model with skip connections and shape matching.
         """
-        x = inputs  # Store input for residual path
+        x = inputs
 
         # === First Layer ===
         shortcut = x
         x = self.dense1(x)
-        x = self.norm1(x, training=training)
+        x = self.norm1(x)
         x = self.act1(x)
-        x = self.dropout1(x, training=training)
+        x = self.dropout1(x)
 
-        # 🔹 Use pre-defined `proj1` instead of creating a new Dense layer dynamically
         if K.int_shape(shortcut)[-1] != K.int_shape(x)[-1]:
             shortcut = self.proj1(shortcut)
         x = Add(name="metrics_residual_add_1")([x, shortcut])
@@ -882,9 +842,9 @@ class EnhancedMetricsModel(tf.keras.layers.Layer):
         # === Second Layer ===
         shortcut = x
         x = self.dense2(x)
-        x = self.norm2(x, training=training)
+        x = self.norm2(x)
         x = self.act2(x)
-        x = self.dropout2(x, training=training)
+        x = self.dropout2(x)
 
         if K.int_shape(shortcut)[-1] != K.int_shape(x)[-1]:
             shortcut = self.proj2(shortcut)
@@ -893,9 +853,9 @@ class EnhancedMetricsModel(tf.keras.layers.Layer):
         # === Third Layer ===
         shortcut = x
         x = self.dense3(x)
-        x = self.norm3(x, training=training)
+        x = self.norm3(x)
         x = self.act3(x)
-        x = self.dropout3(x, training=training)
+        x = self.dropout3(x)
 
         if K.int_shape(shortcut)[-1] != K.int_shape(x)[-1]:
             shortcut = self.proj3(shortcut)
@@ -903,9 +863,9 @@ class EnhancedMetricsModel(tf.keras.layers.Layer):
 
         # === Fourth Layer (No Skip Connection, Output Layer) ===
         x = self.dense4(x)
-        x = self.norm4(x, training=training)
+        x = self.norm4(x)
         x = self.act4(x)
-        x = self.dropout4(x, training=training)
+        x = self.dropout4(x)
 
         return x
 
@@ -965,8 +925,8 @@ class CombinedModel(HyperModel):
         # === Hyperparameter Setup ===
         projection_units = hp.Choice('projection_units', [128, 256, 512])
         num_dense = hp.Choice('clss_depth', [2, 3, 4, 5])  
-        units_dense = hp.Choice('clss_units', [120, 240, 330, 480, 600, 720])
-        dropout_clss = hp.Float('clss_dropout_rate', min_value=0.025, max_value=0.2, step=0.025)
+        units_dense = hp.Choice('clss_units', [240, 330, 480, 600, 720])
+        dropout_clss = hp.Float('clss_dropout_rate', min_value=0.025, max_value=0.125, step=0.025)
         regularizer_value_clss = hp.Float('clss_regularization', min_value=0.0000001, max_value=0.0005, step=0.0000001)
 
         # === Klassifikations-Head mit Verbesserungen ===

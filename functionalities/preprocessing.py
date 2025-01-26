@@ -23,6 +23,26 @@ from scipy.spatial import ConvexHull
 from sklearn.decomposition import PCA
 from scipy.stats import entropy
 import matplotlib.colors as mcolors
+import multiprocessing as mp
+
+def load_and_center(file):
+    """Loads and centers a point cloud."""
+    point_cloud = load_point_cloud(file)  # Load point cloud
+    return center_point_cloud([point_cloud])[0]
+
+def resample_single(args):
+    """Resamples a single point cloud."""
+    point_cloud, netpcsize, idx = args
+    return resample_pointcloud(point_cloud, netpcsize, idx)
+
+def resample_pointclouds_fps(selected_pointclouds, netpcsize, num_workers=None):
+    num_workers = num_workers or mp.cpu_count()//2
+    with mp.Pool(processes=num_workers) as pool:
+        centered_pointclouds = pool.map(load_and_center, selected_pointclouds)
+    with mp.Pool(processes=num_workers) as pool:
+        resampled_pointclouds = pool.map(resample_single, [(centered_pointclouds[i], netpcsize, i) for i in range(len(centered_pointclouds))])
+    logging.info("Resampled a set of %s pointclouds", len(resampled_pointclouds))
+    return np.array(resampled_pointclouds)
 
 def remove_insufficient_pointclouds_fwf(reg_pc_folder, fwf_pc_folder, netpcsize):
     for pointcloud in os.listdir(reg_pc_folder):
@@ -691,14 +711,12 @@ def pad_image(img, pad_t, pad_r, pad_l):
     img: Padded image array.
     """
     height, width = img.shape
-    print("Image shape before padding:", img.shape)
     pad_left = np.zeros((height, int(pad_l)))
     img = np.concatenate((pad_left, img), axis = 1)
     pad_up = np.zeros((int(pad_t), int(pad_l) + width))
     img = np.concatenate((pad_up, img), axis = 0)
     pad_right = np.zeros((height + int(pad_t), int(pad_r)))
     img = np.concatenate((img, pad_right), axis = 1)
-    print("Image shape after padding:", img.shape)
     return img
 
 def center_image(img, abs_max_img_size):
@@ -722,9 +740,7 @@ def center_image(img, abs_max_img_size):
     top = zero_axis_fill
     left = one_axis_fill / 2
     right = one_axis_fill - left
-    print("Copped image shape:", cropped_image.shape)
     padded_image = pad_image(cropped_image, top, left, right)
-    print("Padded image shape:", padded_image.shape)
     return padded_image
 
 def save_colored_image(image, id, species, method, date, ind_id, leaf_cond, angle, pcid, augnum, SAVE_DIR):
@@ -771,11 +787,8 @@ def save_voxelized_pointcloud_images(IMG_SIZE, image_frontal, image_sideways, id
     augnum: Augmentation number of the source point cloud.
     SAVE_DIR: Savepath for the image.
     """
-    print("Frontal image shape before centering:", image_frontal.shape)
     image_frontal_to_save = center_image(image_frontal, abs_max_img_size)
-    print("Frontal image shape after centering:", image_frontal_to_save.shape)
     image_frontal_resized = cv2.resize(image_frontal_to_save, (IMG_SIZE, IMG_SIZE))
-    print("Frontal image shape after resizing:", image_frontal_resized.shape)
     save_colored_image(image_frontal_resized, id, species, method, date, ind_id, leaf_cond, "frontal", pointcloud_id, augmentation_number, SAVE_DIR)
     image_sideways_to_save = center_image(image_sideways, abs_max_img_size)
     image_sideways_resized = cv2.resize(image_sideways_to_save, (IMG_SIZE, IMG_SIZE))
@@ -1002,44 +1015,37 @@ def center_point_cloud(points_list):
         center_points.append(centered_points)
     return center_points
 
-def resample_pointcloud(pointclouds, target_num_points, iteration):
+def resample_pointcloud(pointcloud, target_num_points, iteration):
     """
     Resample a point cloud to a target number of points using non-uniform grid sampling
     followed by farthest point sampling (FPS).
 
     Args:
-        pointclouds (list of numpy.ndarray): List of input point clouds as Nx3 arrays.
+        pointcloud (numpy.ndarray): Input point cloud as Nx3 array.
         target_num_points (int): Target number of points.
         iteration (int): Index of the point cloud to resample.
 
     Returns:
         numpy.ndarray: Resampled point cloud with target_num_points points.
     """
+    num_points = pointcloud.shape[0]  # Ensure correct shape handling
     method = "NONE"
-    pointcloud = pointclouds[iteration]
-    num_points = len(pointcloud)
-    
     if num_points > target_num_points:
-        # Downsample using farthest point sampling
         sampled_pointcloud = farthest_point_sampling(pointcloud, target_num_points)
         method = "FPS"
     elif num_points < target_num_points:
-        # Upsample by interpolating new points and combining with original points
         extra_points_needed = target_num_points - num_points
         interpolated_points = interpolate_points(pointcloud, extra_points_needed)
+        if interpolated_points.shape != (extra_points_needed, 3):
+            raise ValueError(f"Interpolation failed: expected ({extra_points_needed}, 3), got {interpolated_points.shape}")
         sampled_pointcloud = np.vstack((pointcloud, interpolated_points))
         method = "INTERP"
     else:
-        # No resampling needed
         sampled_pointcloud = pointcloud
         method = "NONE"
-
-    logging.info(f"Resampled point cloud {iteration}/{len(pointclouds)} using {method} from {num_points} points to {len(sampled_pointcloud)} points")
-    if len(sampled_pointcloud) < target_num_points:
-        print("\033[31mPointcloud has an insufficient number of points!.\033[0m")
-    else:
-        pass
+    logging.info(f"Resampled point cloud {iteration} using {method} from {num_points} points to {sampled_pointcloud.shape[0]} points")
     return sampled_pointcloud
+
 
 def farthest_point_sampling(pointcloud, num_samples):
     """
@@ -1400,7 +1406,6 @@ def generate_training_data(capsel, growsel, filtered_pointclouds, resampled_poin
             rfe_metrics_pred.append(file_pred)
         else:
             pass
-    print("NaN count in combined_metrics_pred before processing:", np.isnan(combined_metrics_pred).sum())
 
     if len(rfe_metrics) > 0:
         rfe_metrics_path = main_utils.join_paths(metrics_dir, rfe_metrics[0])
@@ -1413,7 +1418,6 @@ def generate_training_data(capsel, growsel, filtered_pointclouds, resampled_poin
         logging.info("Eliminated features shape: %s", len(eliminated_features))
         combined_eliminated_metrics_pred = remove_eliminated_features(combined_metrics_pred, feature_names, eliminated_features, metrics_dir_pred, capsel, growsel)
         logging.info("Metrics shape after Recursive Feature Elimination: %s, %s", combined_eliminated_metrics.shape, combined_eliminated_metrics_pred.shape)
-    print("NaN count in X_metrics_pred after feature elimination:", np.isnan(combined_eliminated_metrics_pred).sum())
 
     logging.debug("Tree species to train on: %s", np.unique(tree_labels))
     logging.info("One-Hot encoding labels!")

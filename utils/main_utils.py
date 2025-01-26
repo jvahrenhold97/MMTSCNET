@@ -48,12 +48,15 @@ def parse_arguments():
                         type=str, default="LEAF-ON")
     parser.add_argument('--batchsize',
                         help='4, 8, 16, 32, ... always use Power of Two!',
-                        type=int, default=16)
+                        type=int, default=8)
     parser.add_argument('--numpoints',
                         help='1024, 2048, ... always double!',
                         type=int, default=2048)
     parser.add_argument('--verbose',
                         help="Display debug logging if used.",
+                        action='store_true')
+    parser.add_argument('--inference',
+                        help="Load optimal hyperparameters and start training immediately.",
                         action='store_true')
     args = parser.parse_args()
     return args
