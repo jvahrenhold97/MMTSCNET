@@ -1,5 +1,5 @@
 import tensorflow as tf
-from keras.layers import Input, Conv1D, BatchNormalization, GlobalMaxPooling1D, Dense, Dropout, Concatenate, Reshape, ReLU, Add, Activation
+from keras.layers import Input, Conv1D, GlobalAveragePooling1D, GlobalMaxPooling1D, Dense, Dropout, Concatenate, Reshape, ReLU, Add, Activation, LayerNormalization, Attention
 from keras.models import Model
 from keras.regularizers import L1L2
 from keras.applications import DenseNet201, DenseNet121
@@ -18,8 +18,14 @@ import seaborn as sns
 import datetime
 import logging
 import pandas as pd
-import keras.backend as K
 from keras.backend import sigmoid
+from keras import initializers
+from keras import regularizers
+from keras import constraints
+from keras.layers import Layer
+from keras.engine.input_spec import InputSpec
+from keras import backend as K
+from keras.losses import CategoricalCrossentropy
 
 # Logging setup for tensorflow
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
@@ -27,11 +33,200 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 from keras import mixed_precision
 policy = mixed_precision.Policy('mixed_float16')
 mixed_precision.set_global_policy(policy)
+tf.config.experimental.set_memory_growth(tf.config.list_physical_devices('GPU')[0], True)
+
+class HybridPooling(Layer):
+    """
+    Combines Global Average Pooling and Global Max Pooling to preserve both
+    dominant and fine-grained features.
+    """
+    def call(self, inputs):
+        avg_pooled = GlobalAveragePooling1D()(inputs)
+        max_pooled = GlobalMaxPooling1D()(inputs)
+        return tf.concat([avg_pooled, max_pooled], axis=-1)
 
 def swish(x, beta = 1):
     return (x * sigmoid(beta * x))
 
+class GroupNormalization(Layer):
+    """Group normalization layer
+
+    Group Normalization divides the channels into groups and computes within each group
+    the mean and variance for normalization. GN's computation is independent of batch sizes,
+    and its accuracy is stable in a wide range of batch sizes
+
+    # Arguments
+        groups: Integer, the number of groups for Group Normalization.
+        axis: Integer, the axis that should be normalized
+            (typically the features axis).
+            For instance, after a `Conv2D` layer with
+            `data_format="channels_first"`,
+            set `axis=1` in `BatchNormalization`.
+        epsilon: Small float added to variance to avoid dividing by zero.
+        center: If True, add offset of `beta` to normalized tensor.
+            If False, `beta` is ignored.
+        scale: If True, multiply by `gamma`.
+            If False, `gamma` is not used.
+            When the next layer is linear (also e.g. `nn.relu`),
+            this can be disabled since the scaling
+            will be done by the next layer.
+        beta_initializer: Initializer for the beta weight.
+        gamma_initializer: Initializer for the gamma weight.
+        beta_regularizer: Optional regularizer for the beta weight.
+        gamma_regularizer: Optional regularizer for the gamma weight.
+        beta_constraint: Optional constraint for the beta weight.
+        gamma_constraint: Optional constraint for the gamma weight.
+
+    # Input shape
+        Arbitrary. Use the keyword argument `input_shape`
+        (tuple of integers, does not include the samples axis)
+        when using this layer as the first layer in a model.
+
+    # Output shape
+        Same shape as input.
+
+    # References
+        - [Group Normalization](https://arxiv.org/abs/1803.08494)
+        - [GitHub Repository](https://github.com/titu1994/Keras-Group-Normalization/blob/master/group_norm.py)
+    """
+
+    def __init__(self,
+                 groups=32,
+                 axis=-1,
+                 epsilon=1e-5,
+                 center=True,
+                 scale=True,
+                 beta_initializer='zeros',
+                 gamma_initializer='ones',
+                 beta_regularizer=None,
+                 gamma_regularizer=None,
+                 beta_constraint=None,
+                 gamma_constraint=None,
+                 **kwargs):
+        super(GroupNormalization, self).__init__(**kwargs)
+        self.supports_masking = True
+        self.groups = groups
+        self.axis = axis
+        self.epsilon = epsilon
+        self.center = center
+        self.scale = scale
+        self.beta_initializer = initializers.get(beta_initializer)
+        self.gamma_initializer = initializers.get(gamma_initializer)
+        self.beta_regularizer = regularizers.get(beta_regularizer)
+        self.gamma_regularizer = regularizers.get(gamma_regularizer)
+        self.beta_constraint = constraints.get(beta_constraint)
+        self.gamma_constraint = constraints.get(gamma_constraint)
+
+    def build(self, input_shape):
+        dim = input_shape[self.axis]
+
+        if dim is None:
+            raise ValueError('Axis ' + str(self.axis) + ' of '
+                             'input tensor should have a defined dimension '
+                             'but the layer received an input with shape ' +
+                             str(input_shape) + '.')
+
+        if dim < self.groups:
+            raise ValueError('Number of groups (' + str(self.groups) + ') cannot be '
+                             'more than the number of channels (' +
+                             str(dim) + ').')
+
+        if dim % self.groups != 0:
+            raise ValueError('Number of groups (' + str(self.groups) + ') must be a '
+                             'multiple of the number of channels (' +
+                             str(dim) + ').')
+
+        self.input_spec = InputSpec(ndim=len(input_shape),
+                                    axes={self.axis: dim})
+        shape = (dim,)
+
+        if self.scale:
+            self.gamma = self.add_weight(shape=shape,
+                                         name='gamma',
+                                         initializer=self.gamma_initializer,
+                                         regularizer=self.gamma_regularizer,
+                                         constraint=self.gamma_constraint)
+        else:
+            self.gamma = None
+        if self.center:
+            self.beta = self.add_weight(shape=shape,
+                                        name='beta',
+                                        initializer=self.beta_initializer,
+                                        regularizer=self.beta_regularizer,
+                                        constraint=self.beta_constraint)
+        else:
+            self.beta = None
+        self.built = True
+
+    def call(self, inputs, **kwargs):
+        input_shape = K.int_shape(inputs)
+        tensor_input_shape = K.shape(inputs)
+
+        # Prepare broadcasting shape.
+        reduction_axes = list(range(len(input_shape)))
+        del reduction_axes[self.axis]
+        broadcast_shape = [1] * len(input_shape)
+        broadcast_shape[self.axis] = input_shape[self.axis] // self.groups
+        broadcast_shape.insert(1, self.groups)
+
+        reshape_group_shape = K.shape(inputs)
+        group_axes = [reshape_group_shape[i] for i in range(len(input_shape))]
+        group_axes[self.axis] = input_shape[self.axis] // self.groups
+        group_axes.insert(1, self.groups)
+
+        # reshape inputs to new group shape
+        group_shape = [group_axes[0], self.groups] + group_axes[2:]
+        group_shape = K.stack(group_shape)
+        inputs = K.reshape(inputs, group_shape)
+
+        group_reduction_axes = list(range(len(group_axes)))
+        group_reduction_axes = group_reduction_axes[2:]
+
+        mean = K.mean(inputs, axis=group_reduction_axes, keepdims=True)
+        variance = K.var(inputs, axis=group_reduction_axes, keepdims=True)
+
+        inputs = (inputs - mean) / (K.sqrt(variance + self.epsilon))
+
+        # prepare broadcast shape
+        inputs = K.reshape(inputs, group_shape)
+        outputs = inputs
+
+        # In this case we must explicitly broadcast all parameters.
+        if self.scale:
+            broadcast_gamma = K.reshape(self.gamma, broadcast_shape)
+            outputs = outputs * broadcast_gamma
+
+        if self.center:
+            broadcast_beta = K.reshape(self.beta, broadcast_shape)
+            outputs = outputs + broadcast_beta
+
+        outputs = K.reshape(outputs, tensor_input_shape)
+
+        return outputs
+
+    def get_config(self):
+        config = {
+            'groups': self.groups,
+            'axis': self.axis,
+            'epsilon': self.epsilon,
+            'center': self.center,
+            'scale': self.scale,
+            'beta_initializer': initializers.serialize(self.beta_initializer),
+            'gamma_initializer': initializers.serialize(self.gamma_initializer),
+            'beta_regularizer': regularizers.serialize(self.beta_regularizer),
+            'gamma_regularizer': regularizers.serialize(self.gamma_regularizer),
+            'beta_constraint': constraints.serialize(self.beta_constraint),
+            'gamma_constraint': constraints.serialize(self.gamma_constraint)
+        }
+        base_config = super(GroupNormalization, self).get_config()
+        return dict(list(base_config.items()) + list(config.items()))
+
+    def compute_output_shape(self, input_shape):
+        return input_shape
+
 keras.utils.generic_utils.get_custom_objects().update({'swish': Activation(swish)})
+keras.utils.generic_utils.get_custom_objects().update({'GroupNormalization': GroupNormalization})
+keras.utils.generic_utils.get_custom_objects().update({'HybridPooling': HybridPooling})
 
 def scheduler(epoch, lr):
     """
@@ -44,13 +239,12 @@ def scheduler(epoch, lr):
     Returns:
     lr: Lraning rate to be applied during the next epoch.
     """
-    if epoch < 3:
-        return lr * 1.005
+    if epoch % 10 == 0:  # Every 10 epochs, increase LR
+        return min(lr * 1.1, 1e-4)  # Limit max LR
+    if lr >= 5e-7:
+        return lr*0.97
     else:
-        if lr >= 5e-6:
-            return lr * 0.85
-        else:
-            return lr
+        return lr
         
 def check_if_model_is_created(modeldir):
     """
@@ -163,7 +357,7 @@ def load_trained_model_from_folder(model_path):
     model = keras.models.load_model(model_path)
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=7.5e-6),
-        loss='categorical_crossentropy',
+        loss=CategoricalCrossentropy(label_smoothing=0.05),
         metrics=['accuracy', tf.keras.metrics.Precision(name="precision"), tf.keras.metrics.Recall(name="recall"), tf.keras.metrics.AUC(name="pr_curve", curve="PR"), tf.keras.metrics.PrecisionAtRecall(0.85, name="pr_at_rec"), tf.keras.metrics.RecallAtPrecision(0.85, name="rec_at_pr")]
     )
     return model
@@ -189,7 +383,7 @@ def load_tuned_model_from_folder(model_path):
     model = keras.models.load_model(model_path, custom_objects)
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=7.5e-6),
-        loss='categorical_crossentropy',
+        loss=CategoricalCrossentropy(label_smoothing=0.05),
         metrics=['accuracy', tf.keras.metrics.Precision(name="precision"), tf.keras.metrics.Recall(name="recall"), tf.keras.metrics.AUC(name="pr_curve", curve="PR"), tf.keras.metrics.PrecisionAtRecall(0.85, name="pr_at_rec"), tf.keras.metrics.RecallAtPrecision(0.85, name="rec_at_pr")]
     )
     return model
@@ -251,37 +445,40 @@ def predict_for_data(trained_model, X_pc_val, X_metrics_val, X_img_1_val, X_img_
     Returns:
     (Saved): A classified plot point cloud.
     """
-    keras.backend.clear_session()
-    print("Min values of X_metrics_pred:", np.min(X_metrics_pred, axis=0))
-    print("Max values of X_metrics_pred:", np.max(X_metrics_pred, axis=0))
-    print("Columns where max == min:", np.where(np.min(X_metrics_pred, axis=0) == np.max(X_metrics_pred, axis=0))[0])
-    X_img_1_pred, X_img_2_pred, X_pc_pred, X_metrics_pred = normalize_data(X_pc_pred, X_img_1_pred, X_img_2_pred, X_metrics_pred)
+    K.clear_session()
+
+    X_img_1_pred, X_img_2_pred, X_pc_pred, X_metrics_pred = normalize_data(
+        X_pc_pred, X_img_1_pred, X_img_2_pred, X_metrics_pred
+    )
     check_data(X_pc_pred, X_img_1_pred, X_img_2_pred, X_metrics_pred, y_pred)
-    corruption_found = check_label_corruption(y_pred)
-    if not corruption_found:
-        logging.info("No corruption found in one-hot encoded labels!")
-    logging.info(f"Distribution in training data: {get_class_distribution(y_pred)}")
-    predictions = trained_model.predict([X_pc_pred, X_img_1_pred, X_img_2_pred, X_metrics_pred], batch_size=16, verbose=1)
-    # Translation of labels
-    y_pred_real = map_onehot_to_real(predictions, label_dict)
-    y_true_real = map_onehot_to_real(y_pred, label_dict)
-    # Plotting of confusion matrix and training metrics
-    plot_conf_matrix(y_true_real, y_pred_real, "PRED", plot_path, label_dict, capsel, growsel, netpcsize)
-    print("Min values of X_metrics_val:", np.min(X_metrics_val, axis=0))
-    print("Max values of X_metrics_val:", np.max(X_metrics_val, axis=0))
-    print("Columns where max == min:", np.where(np.min(X_metrics_val, axis=0) == np.max(X_metrics_val, axis=0))[0])
-    X_img_1_val, X_img_2_val, X_pc_val, X_metrics_val = normalize_data(X_pc_val, X_img_1_val, X_img_2_val, X_metrics_val)
+    pred_results = np.zeros_like(y_pred)
+    for _ in range(10):
+        predictions = trained_model.predict(
+            [X_pc_pred, X_img_1_pred, X_img_2_pred, X_metrics_pred], batch_size=8, verbose=1
+        )
+        pred_results += predictions
+    pred_results /= 10
+    y_pred_real = map_onehot_to_real(pred_results, label_dict)
+    y_true_real = map_onehot_to_real(y_pred, label_dict)   
+    plot_conf_matrix(
+        y_true_real, y_pred_real, "PRED", plot_path, label_dict, capsel, growsel, netpcsize
+    ) 
+    X_img_1_val, X_img_2_val, X_pc_val, X_metrics_val = normalize_data(
+        X_pc_val, X_img_1_val, X_img_2_val, X_metrics_val
+    )
     check_data(X_pc_val, X_img_1_val, X_img_2_val, X_metrics_val, y_val)
-    corruption_found = check_label_corruption(y_val)
-    if not corruption_found:
-        logging.info("No corruption found in one-hot encoded labels!")
-    logging.info(f"Distribution in training data: {get_class_distribution(y_val)}")
-    predictions = trained_model.predict([X_pc_val, X_img_1_val, X_img_2_val, X_metrics_val], batch_size=16, verbose=1)
-    # Translation of labels
-    y_val_real = map_onehot_to_real(predictions, label_dict)
+    val_results = np.zeros_like(y_val)
+    for _ in range(10):
+        predictions = trained_model.predict(
+            [X_pc_val, X_img_1_val, X_img_2_val, X_metrics_val], batch_size=8, verbose=1
+        )
+        val_results += predictions
+    val_results /= 10
+    y_val_real = map_onehot_to_real(val_results, label_dict)
     y_true_real = map_onehot_to_real(y_val, label_dict)
-    # Plotting of confusion matrix and training metrics
-    plot_conf_matrix(y_true_real, y_val_real, "VAL", plot_path, label_dict, capsel, growsel, netpcsize)
+    plot_conf_matrix(
+        y_true_real, y_val_real, "VAL", plot_path, label_dict, capsel, growsel, netpcsize
+    )
         
 def check_label_corruption(one_hot_labels):
     """
@@ -421,7 +618,7 @@ def plot_conf_matrix(true_labels, predicted_labels, name, plot_path, label_dict,
     conf_matrix = confusion_matrix(true_labels, predicted_labels, labels=unique_labels)
     # Plot the confusion matrix
     plt.figure(figsize=(10, 8))
-    sns.heatmap(conf_matrix, annot=True, fmt='d', cmap='magma', cbar=False, xticklabels=unique_labels, yticklabels=unique_labels)
+    sns.heatmap(conf_matrix, annot=True, fmt='d', cmap='twilight', cbar=False, xticklabels=unique_labels, yticklabels=unique_labels)
     plt.xlabel('Predicted Labels')
     plt.ylabel('True Labels')
     plt.title('Confusion Matrix')
@@ -459,22 +656,6 @@ def plot_best_epoch_metrics(history, modeldir):
     # Save the table as an image
     plt.savefig(os.path.join(modeldir, 'best_epoch_metrics.png'))
     plt.close()
-
-def get_class_distribution(one_hot_labels):
-    """
-    Returns the class distribution from a set of one-hot encoded labels.
-    
-    Parameters:
-    one_hot_labels: A 2D NumPy array of one-hot encoded labels.
-    
-    Returns:
-    dict: A dictionary where keys are class indices and values are the counts of each class.
-    """
-    # Sum along the rows to get the count of each class
-    class_counts = np.sum(one_hot_labels, axis=0)
-    # Create a dictionary with class indices as keys and counts as values
-    class_distribution = {i: int(count) for i, count in enumerate(class_counts)}
-    return class_distribution
 
 def map_onehot_to_real(onehot_lbls, onehot_to_text_dict):
     """
@@ -624,10 +805,10 @@ class PointCloudExtractor(tf.keras.layers.Layer):
 
     def build(self, input_shape):
         # === Hyperparameter Configuration ===
-        num_conv1d = self.hp.Choice('pce_depth', [1, 2, 3, 4, 5])
-        hp_units = self.hp.Choice('pce_units', values=[256, 384, 512, 768])
-        hp_dropout_rate = self.hp.Float('pce_dropout_rate', min_value=0.025, max_value=0.125, step=0.025)
-        hp_regularizer = self.hp.Float('pce_regularization', min_value=0.0000001, max_value=0.0005, step=0.0000001)
+        num_conv1d = self.hp.Choice('pce_depth', [2, 3, 4])
+        hp_units = self.hp.Choice('pce_units', values=[192, 256, 512])
+        hp_dropout_rate = self.hp.Float('pce_dropout_rate', min_value=0.2, max_value=0.3, step=0.025)
+        hp_regularizer = self.hp.Float('pce_regularization', min_value=0.00001, max_value=0.002, step=0.00001)
         hp_neighbors = self.hp.Int('pce_neighbors', min_value=8, max_value=64, step=8)
 
         # === Multi-Scale Grouping Radii ===
@@ -640,24 +821,26 @@ class PointCloudExtractor(tf.keras.layers.Layer):
 
         # === Feature Extraction Convolutions ===
         self.conv1 = Conv1D(hp_units, 1, padding="same", kernel_regularizer=L1L2(l1=hp_regularizer, l2=hp_regularizer), name="pce_conv_01")
-        self.norm1 = BatchNormalization(name="pce_bnorm_01")
+        self.norm1 = GroupNormalization(groups=16, name="pce_lnorm_01")
         self.act1 = Activation('swish', name="pce_swish_01")
         self.dropout1 = Dropout(hp_dropout_rate, name="pce_dropout_01")
 
         self.conv_blocks = []
         for i in range(num_conv1d):
-            filters = hp_units // (i + 1)
+            filters = max(32, (hp_units // (i + 1)))
+            filters = filters - (filters % 16)
             conv = Conv1D(filters, 1, padding='same', kernel_regularizer=L1L2(l1=hp_regularizer, l2=hp_regularizer), name=f"pce_conv_b_{i}")
-            norm = BatchNormalization(name=f"pce_bnorm_b_{i}")
+            norm = GroupNormalization(groups=16, name=f"pce_lnorm_b_{i}")
             act = Activation('swish', name=f"pce_swish_b_{i}")
             dropout = Dropout(hp_dropout_rate, name=f"pce_dropout_b_{i}")
             self.conv_blocks.append((conv, norm, act, dropout))
 
         self.residual_conv = Conv1D(hp_units, 1, padding="same", name="pce_conv_res_01")
-        self.global_pool = GlobalMaxPooling1D(name="pce_gmpool_01")
-        self.global_norm = BatchNormalization(name="pce_gnorm_01")
+        self.global_pool = HybridPooling(name="pce_hybpool_01")
+        self.global_norm = GroupNormalization(groups=16, name="pce_lnorm_01")
 
         self.transform = OrthogonalTNet(3, self.hp)
+        self.global_feature_mix = Dense(hp_units, activation='swish', name="pce_feature_mix")
 
     def call(self, inputs):
         batch_size = tf.shape(inputs)[0]
@@ -673,14 +856,15 @@ class PointCloudExtractor(tf.keras.layers.Layer):
         for radius in self.radii:
             num_neighbors = self.msg_neighbors
 
-            # Ball Query
+            #indices = tfg.nn.knn.knn(point_cloud_transformed, k=num_neighbors)
             within_radius_mask = tf.cast(distances <= radius, tf.float32)
             indices = tf.math.top_k(within_radius_mask, k=num_neighbors)[1]
             grouped_feature = tf.gather(point_cloud_transformed, indices, batch_dims=1)
             grouped_features.append(grouped_feature)
 
-        # === Feature Aggregation ===
+        # === Feature Aggregation with Learnable Mixing ===
         features = tf.concat(grouped_features, axis=-1)
+        features = self.global_feature_mix(features)
         features = self.conv1(features)
         features = self.norm1(features)
         features = self.act1(features)
@@ -705,6 +889,7 @@ class PointCloudExtractor(tf.keras.layers.Layer):
 
         return self.global_pool(features)
 
+
 class OrthogonalTNet(tf.keras.layers.Layer):
     """
     Optimized T-Net with Orthogonality Regularization for Stability.
@@ -715,18 +900,21 @@ class OrthogonalTNet(tf.keras.layers.Layer):
         self.hp = hp
 
     def build(self, input_shape):
-        hp_units = self.hp.Choice('tnet_units', values=[32, 64, 128, 256])
-        hp_reg = self.hp.Float('tnet_regularization', min_value=0.0000001, max_value=0.0005, step=0.0000001)
-        hp_dropout = self.hp.Float('tnet_dropout', min_value=0.025, max_value=0.125, step=0.025)
+        hp_units = self.hp.Choice('tnet_units', values=[32, 64, 128])
+        hp_reg = self.hp.Float('tnet_regularization', min_value=0.000001, max_value=0.002, step=0.000001)
+        hp_dropout = self.hp.Float('tnet_dropout', min_value=0.25, max_value=0.4, step=0.025)
 
+        # === Feature Extraction ===
         self.conv1 = Conv1D(hp_units, 1, kernel_regularizer=L1L2(l1=hp_reg, l2=hp_reg), name="t_net_conv_01")
-        self.norm1 = BatchNormalization(name="t_net_bnorm_01")
+        self.norm1 = GroupNormalization(groups=8, name="t_net_gnorm_01")
         self.act1 = Activation('swish', name="t_net_swish_01")
-        self.dropout1 = Dropout(hp_dropout, name="t_net_dropout_01")
+        self.dropout1 = Dropout(hp_dropout*0.75, name="t_net_dropout_01")
 
         self.global_pool = GlobalMaxPooling1D(name="t_net_gmpool_01")
+
+        # === Dense Layers ===
         self.dense1 = Dense(hp_units, kernel_regularizer=L1L2(l1=hp_reg, l2=hp_reg), name="t_net_dense_01")
-        self.norm2 = BatchNormalization(name="t_net_bnorm_02")
+        self.norm2 = LayerNormalization(name="t_net_lnorm_01")
         self.act2 = Activation('swish', name="t_net_swish_02")
         self.dropout2 = Dropout(hp_dropout, name="t_net_dropout_02")
 
@@ -740,6 +928,7 @@ class OrthogonalTNet(tf.keras.layers.Layer):
         x = self.dropout1(x)
 
         x = self.global_pool(x)
+
         x = self.dense1(x)
         x = self.norm2(x)
         x = self.act2(x)
@@ -748,28 +937,35 @@ class OrthogonalTNet(tf.keras.layers.Layer):
         x = self.dense2(x)
         x = self.reshape(x)
 
+        identity = tf.eye(self.transform_size, batch_shape=[tf.shape(x)[0]], dtype=x.dtype)
+        ortho_loss = tf.norm(tf.matmul(x, tf.transpose(x, [0, 2, 1])) - identity, ord='fro', axis=[-2, -1])
+        self.add_loss(0.01 * tf.reduce_mean(ortho_loss))
+
         return x
 
 class DenseNetModel(tf.keras.layers.Layer):
     """
-    MMTSCNet image processor (DenseNet121).
-
+    MMTSCNet Image Processor with Partial Fine-Tuning.
     """
-    def __init__(self, img_input_shape, **kwargs):
+    def __init__(self, img_input_shape, fine_tune_at=180, **kwargs):
         super(DenseNetModel, self).__init__(**kwargs)
         self.img_input_shape = img_input_shape
+        self.fine_tune_at = fine_tune_at
 
     def build(self, input_shape):
-        # Defintion of DenseNet201 without classifier
-        self.model = DenseNet121(include_top=False, input_shape=self.img_input_shape, pooling='avg')
+        base_model = DenseNet121(include_top=False, input_shape=self.img_input_shape, pooling='avg')
+        for layer in base_model.layers[:self.fine_tune_at]:
+            layer.trainable = False
+        for layer in base_model.layers[self.fine_tune_at:]:
+            layer.trainable = True
+        self.model = base_model
 
     def call(self, inputs):
-        x = self.model(inputs)
-        return x
+        return self.model(inputs)
 
     def get_config(self):
         config = super(DenseNetModel, self).get_config()
-        config.update({'img_input_shape': self.img_input_shape})
+        config.update({'img_input_shape': self.img_input_shape, 'fine_tune_at': self.fine_tune_at})
         return config
 
     @classmethod
@@ -790,30 +986,30 @@ class EnhancedMetricsModel(tf.keras.layers.Layer):
 
     def build(self, input_shape):
         # Hyperparameter Configuration
-        units = self.hp.Choice('metrics_units', values=[256, 512, 768])
-        dropout_rate = self.hp.Float('metrics_dropout_rate', min_value=0.025, max_value=0.125, step=0.025)
-        regularization = self.hp.Float('metrics_regularization', min_value=0.0000001, max_value=0.0005, step=0.0000001)
+        units = self.hp.Choice('metrics_units', values=[128, 256, 512])
+        dropout_rate = self.hp.Float('metrics_dropout_rate', min_value=0.2, max_value=0.4, step=0.025)
+        regularization = self.hp.Float('metrics_regularization', min_value=0.00001, max_value=0.002, step=0.00001)
 
         # === Define Layers in build() ===
-        self.dense1 = Dense(units, activation=None, kernel_regularizer=L1L2(l1=regularization/6, l2=regularization/6), name="metrics_dense_1")
-        self.norm1 = BatchNormalization(name="metrics_norm_1")
+        self.dense1 = Dense(units, activation=None, kernel_regularizer=L1L2(l1=regularization/8, l2=regularization/8), name="metrics_dense_1")
+        self.norm1 = LayerNormalization(name="metrics_norm_1")
         self.act1 = Activation('swish', name="metrics_swish_1")
         self.dropout1 = Dropout(dropout_rate, name="metrics_dropout_1")
 
         self.dense2 = Dense(units // 2, activation=None, kernel_regularizer=L1L2(l1=regularization/4, l2=regularization/4), name="metrics_dense_2")
-        self.norm2 = BatchNormalization(name="metrics_norm_2")
+        self.norm2 = LayerNormalization(name="metrics_norm_2")
         self.act2 = Activation('swish', name="metrics_swish_2")
         self.dropout2 = Dropout(dropout_rate/2, name="metrics_dropout_2")
 
         self.dense3 = Dense(units // 4, activation=None, kernel_regularizer=L1L2(l1=regularization/2, l2=regularization/2), name="metrics_dense_3")
-        self.norm3 = BatchNormalization(name="metrics_norm_3")
+        self.norm3 = LayerNormalization(name="metrics_norm_3")
         self.act3 = Activation('swish', name="metrics_swish_3")
         self.dropout3 = Dropout(dropout_rate/4, name="metrics_dropout_3")
 
         self.dense4 = Dense(units // 8, activation=None, kernel_regularizer=L1L2(l1=regularization, l2=regularization), name="metrics_dense_4")
-        self.norm4 = BatchNormalization(name="metrics_norm_4")
+        self.norm4 = LayerNormalization(name="metrics_norm_4")
         self.act4 = Activation('swish', name="metrics_swish_4")
-        self.dropout4 = Dropout(dropout_rate/6, name="metrics_dropout_4")
+        self.dropout4 = Dropout(dropout_rate/8, name="metrics_dropout_4")
 
         # === Projection Layers for Skip Connections ===
         self.proj1 = Dense(units, activation=None, name="metrics_proj_1")
@@ -861,7 +1057,7 @@ class EnhancedMetricsModel(tf.keras.layers.Layer):
             shortcut = self.proj3(shortcut)
         x = Add(name="metrics_residual_add_3")([x, shortcut])
 
-        # === Fourth Layer (No Skip Connection, Output Layer) ===
+        # === Fourth Layer ===
         x = self.dense4(x)
         x = self.norm4(x)
         x = self.act4(x)
@@ -883,11 +1079,23 @@ def residual_dense_block(x, units, dropout_rate, regularizer_value, name_prefix)
     Implements a residual dense block with proper skip connection handling.
     Ensures skip connection dimensions always match the output.
     """
+    if units <= 32:
+        num_groups = 1
+    elif units <= 64:
+        num_groups = 4
+    elif units <= 128:
+        num_groups = 8
+    elif units <= 256:
+        num_groups = 16
+    else:
+        num_groups = 32
+    adaptive_dropout = dropout_rate * (1 + (units / 256))  
+    adaptive_regularization = regularizer_value * (1 + (units / 512))
     shortcut = x  
-    x = Dense(units, activation=None, kernel_regularizer=L1L2(l1=regularizer_value, l2=regularizer_value), name=f"{name_prefix}_dense")(x)
-    x = BatchNormalization(name=f"{name_prefix}_bn")(x)
+    x = Dense(units, activation=None, kernel_regularizer=L1L2(l1=adaptive_regularization, l2=adaptive_regularization), name=f"{name_prefix}_dense")(x)
+    x = GroupNormalization(groups=num_groups, name=f"{name_prefix}_gnorm")(x)
     x = Activation('swish', name=f"{name_prefix}_swish")(x)
-    x = Dropout(dropout_rate, name=f"{name_prefix}_dropout")(x)
+    x = Dropout(adaptive_dropout, name=f"{name_prefix}_dropout")(x)
     input_dim = K.int_shape(shortcut)[-1]
     if input_dim != units:
         shortcut = Dense(units, activation=None, name=f"{name_prefix}_shortcut_projection")(shortcut)  
@@ -923,31 +1131,56 @@ class CombinedModel(HyperModel):
         metrics_branch = EnhancedMetricsModel(hp)(metrics_input)
 
         # === Hyperparameter Setup ===
-        projection_units = hp.Choice('projection_units', [128, 256, 512])
-        num_dense = hp.Choice('clss_depth', [2, 3, 4, 5])  
-        units_dense = hp.Choice('clss_units', [240, 330, 480, 600, 720])
-        dropout_clss = hp.Float('clss_dropout_rate', min_value=0.025, max_value=0.125, step=0.025)
-        regularizer_value_clss = hp.Float('clss_regularization', min_value=0.0000001, max_value=0.0005, step=0.0000001)
+        projection_units = hp.Choice('projection_units', [64, 128, 192])
+        num_dense = hp.Choice('clss_depth', [3, 4, 5])  
+        units_dense = hp.Choice('clss_units', [128, 256, 512])
+        dropout_clss = hp.Float('clss_dropout_rate', min_value=0.25, max_value=0.4, step=0.025)
+        regularizer_value_clss = hp.Float('clss_regularization', min_value=0.00001, max_value=0.002, step=0.00001)
 
-        # === Klassifikations-Head mit Verbesserungen ===
+        # Compute attention-based feature weights
+        fusion_features = Concatenate()([pointnet_branch, image_branch_1, image_branch_2, metrics_branch])
+        attention_scores = Dense(128, activation="swish", kernel_regularizer=L1L2(l1=regularizer_value_clss, l2=regularizer_value_clss))(fusion_features)
+
+        # Sigmoid-based independent scaling (instead of softmax)
+        attention_weights = Dense(4, activation="sigmoid")(attention_scores)  
+        pointnet_weight, image1_weight, image2_weight, metrics_weight = tf.split(attention_weights, 4, axis=-1)
+
+        # Apply learned weights to extracted features (not layer size!)
+        pointnet_branch = pointnet_branch * (pointnet_weight + 1)
+        image_branch_1 = image_branch_1 * (image1_weight + 1)
+        image_branch_2 = image_branch_2 * (image2_weight + 1)
+        metrics_branch = metrics_branch * (metrics_weight + 1)
+
+        # === Projection Layers (Fixed neuron count) ===
         pointnet_branch = Dense(projection_units, activation=None, name="pce_projection")(pointnet_branch)
         image_branch_1 = Dense(projection_units, activation=None, name="img1_projection")(image_branch_1)
         image_branch_2 = Dense(projection_units, activation=None, name="img2_projection")(image_branch_2)
         metrics_branch = Dense(projection_units, activation=None, name="metrics_projection")(metrics_branch)
+
+        # Concatenation
         x = Concatenate(name="concat_all")([pointnet_branch, image_branch_1, image_branch_2, metrics_branch])
 
         for i in range(1, num_dense + 1):
-            units = max(16, units_dense // (2**i))
+            units = max(16, (units_dense // (2**i)) - ((units_dense // (2**i)) % 8))
             x = residual_dense_block(x, units, dropout_clss, regularizer_value_clss, f"clss_block_{i}")
 
         output = Dense(self.num_classes, activation='softmax', name='output')(x)
 
         model = Model(inputs=[pointnet_input, image_input_1, image_input_2, metrics_input], outputs=output)
         # Learning rate setup
-        initial_learning_rate = hp.Choice('learning_rate', [5e-4, 1e-4, 5e-5, 1e-5])
+        initial_learning_rate = hp.Choice('learning_rate', [5e-5, 2.5e-5, 1e-5, 7.5e-6, 5e-6, 2.5e-6, 1e-6, 7.5e-7, 5e-7])
         model.compile(optimizer=Adam(learning_rate=initial_learning_rate, clipnorm=1.0),
-                      loss='categorical_crossentropy',
+                      loss=CategoricalCrossentropy(label_smoothing=0.05),
                       metrics=['accuracy', tf.keras.metrics.Precision(name="precision"), tf.keras.metrics.Recall(name="recall"), tf.keras.metrics.AUC(name="pr_curve", curve="PR"), tf.keras.metrics.PrecisionAtRecall(0.85, name="pr_at_rec"), tf.keras.metrics.RecallAtPrecision(0.85, name="rec_at_pr")])
+        
+        trainable_params = np.sum([K.count_params(w) for w in model.trainable_weights])
+        param_memory = (trainable_params * 3.0) / (1024 * 1024)
+        activation_memory = param_memory * 2.0
+        gradient_memory = param_memory
+        optimizer_memory = param_memory * 2.0
+        total_memory = param_memory + activation_memory + gradient_memory + optimizer_memory
+        logging.info("Trainable Parameters: %s - Estimated VRAM usage: %s MB", trainable_params, total_memory)
+
         return model
 
     def get_untrained_model(self, best_hyperparameters):

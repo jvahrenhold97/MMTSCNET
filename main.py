@@ -12,6 +12,7 @@ def run_mmtscnet():
 
     """
     gpus = tf.config.list_physical_devices('GPU')
+    tf.config.experimental.set_memory_growth(tf.config.list_physical_devices('GPU')[0], True)
     if len(gpus)>0:
         args = main_utils.parse_arguments()
         log_level = logging.DEBUG if args.verbose else logging.INFO
@@ -25,7 +26,7 @@ def run_mmtscnet():
             logging.info("Preprocessing data...")
             X_pc_train, X_pc_val, X_pc_pred, X_metrics_train, X_metrics_val, X_metrics_pred, X_img_1_train, X_img_1_val, X_img_1_pred, X_img_2_train, X_img_2_val, X_img_2_pred, y_train, y_val, y_pred, num_classes, label_dict = main_functions.preprocess_data(workspace_paths, sss_test, cap_sel, grow_sel, elim_per, max_pcscale, pc_size, img_size, fwf_av)
             if args.inference and grow_sel != "ALL" and cap_sel not in ["ALL", "TLS"]:
-                untrained_model, optimal_learning_rate = main_functions.build_mmtscnet_with_optimal_hps(pc_size, img_size, num_classes, cap_sel, grow_sel, fwf_av, X_metrics_train)
+                untrained_model, optimal_learning_rate = main_functions.build_mmtscnet_with_optimal_hps(pc_size, img_size, num_classes, cap_sel, grow_sel, fwf_av, X_metrics_train, model_dir)
             else:
                 logging.info("Commencing hyperparameter-tuning...")
                 untrained_model, optimal_learning_rate = main_functions.perform_hp_tuning(model_dir, X_pc_train, X_img_1_train, X_img_2_train, X_metrics_train, y_train, X_pc_val, X_img_1_val, X_img_2_val, X_metrics_val, y_val, bsize, pc_size, img_size, num_classes, cap_sel, grow_sel, fwf_av)

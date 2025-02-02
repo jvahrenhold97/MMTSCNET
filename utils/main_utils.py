@@ -33,10 +33,10 @@ def parse_arguments():
                         type=str, required=True)
     parser.add_argument('--elimper',
                         help='Threshold percentage which defines which tree species should not be included based on their representation percentage. Range: [0 - 99]',
-                        type=float, default=5.0)
+                        type=float, default=3.0)
     parser.add_argument('--maxpcscale',
                         help='Maximum scaling to apply when augmenting pointclouds. Range: [0.001 - 0.05]',
-                        type=float, default=0.05)
+                        type=float, default=0.075)
     parser.add_argument('--ssstest',
                         help='Ratio for validation data. Range: [0.05 - 0.5]',
                         type=float, default=0.20)
@@ -48,7 +48,7 @@ def parse_arguments():
                         type=str, default="LEAF-ON")
     parser.add_argument('--batchsize',
                         help='4, 8, 16, 32, ... always use Power of Two!',
-                        type=int, default=8)
+                        type=int, default=10)
     parser.add_argument('--numpoints',
                         help='1024, 2048, ... always double!',
                         type=int, default=2048)
@@ -90,9 +90,9 @@ def validate_inputs(datadir, workdir, modeldir, elimper, maxpcscale, ssstest, ca
     else:
         logging.error("Elimination percentage can not be 100 or higher! Exiting now!")
         sys.exit(1)
-    if maxpcscale > 0.001 and maxpcscale < 0.051:
+    if maxpcscale > 0.01 and maxpcscale < 0.1:
         max_pcscale = maxpcscale
-    elif maxpcscale < 0.001 or maxpcscale > 0.051:
+    elif maxpcscale < 0.01 or maxpcscale > 0.1:
         logging.error("Scaling factor is too small/large! Exiting now!")
         sys.exit(1)
     if ssstest > 0.05 and ssstest < 0.5:
@@ -110,7 +110,7 @@ def validate_inputs(datadir, workdir, modeldir, elimper, maxpcscale, ssstest, ca
     else:
         logging.error("Growth selection can only be [LEAF-ON | LEAF-OFF | ALL]! Exiting now!")
         sys.exit(1)
-    if batchsize == 4 or batchsize == 8 or batchsize == 16 or batchsize == 32:
+    if batchsize == 4 or batchsize == 8 or batchsize == 10 or batchsize == 12 or batchsize == 16 or batchsize == 32:
         bsize = batchsize
     else:
         logging.error("Batch size can only be [4 | 8 | 16 | 32]! Exiting now!")

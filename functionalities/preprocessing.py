@@ -24,21 +24,28 @@ from sklearn.decomposition import PCA
 from scipy.stats import entropy
 import matplotlib.colors as mcolors
 import multiprocessing as mp
+import sys
+import keras
 
 def load_and_center(file):
     """Loads and centers a point cloud."""
-    point_cloud = load_point_cloud(file)  # Load point cloud
+    logging.info(f"Loading and centering: {file}")
+    sys.stdout.flush()
+    point_cloud = load_point_cloud(file)
     return center_point_cloud([point_cloud])[0]
 
 def resample_single(args):
     """Resamples a single point cloud."""
     point_cloud, netpcsize, idx = args
+    logging.info(f"Resampling point cloud {idx}")
+    sys.stdout.flush()
     return resample_pointcloud(point_cloud, netpcsize, idx)
 
 def resample_pointclouds_fps(selected_pointclouds, netpcsize, num_workers=None):
     num_workers = num_workers or mp.cpu_count()//2
     with mp.Pool(processes=num_workers) as pool:
         centered_pointclouds = pool.map(load_and_center, selected_pointclouds)
+    logging.info("Centered a set of %s pointclouds", len(centered_pointclouds))
     with mp.Pool(processes=num_workers) as pool:
         resampled_pointclouds = pool.map(resample_single, [(centered_pointclouds[i], netpcsize, i) for i in range(len(centered_pointclouds))])
     logging.info("Resampled a set of %s pointclouds", len(resampled_pointclouds))
@@ -53,12 +60,19 @@ def remove_insufficient_pointclouds_fwf(reg_pc_folder, fwf_pc_folder, netpcsize)
             fwf_species = fwf_pointcloud.split("_")[2]
             if reg_id == fwf_id and reg_species == fwf_species:
                 file_path = os.path.join(reg_pc_folder, pointcloud)
-                las_file = lp.read(file_path)
-                points = np.vstack((las_file.x, las_file.y, las_file.z)).transpose()
-                if len(points) < netpcsize:
-                    logging.info("Found pointcloud with %s/%s points. Removing it!", len(points), netpcsize)
-                    os.remove(os.path.join(reg_pc_folder, pointcloud))
-                    os.remove(os.path.join(fwf_pc_folder, fwf_pointcloud))
+                fwf_path = os.path.join(fwf_pc_folder, fwf_pointcloud)
+                if os.path.isfile(file_path):
+                    if os.path.isfile(fwf_path):
+                        las_file = lp.read(file_path)
+                        points = np.vstack((las_file.x, las_file.y, las_file.z)).transpose()
+                        if len(points) < netpcsize:
+                            logging.info("Found pointcloud with %s/%s points. Removing it!", len(points), netpcsize)
+                            os.remove(os.path.join(reg_pc_folder, pointcloud))
+                            os.remove(os.path.join(fwf_pc_folder, fwf_pointcloud))
+                    else:
+                        pass
+                else:
+                    pass
 
 def remove_insufficient_pointclouds(reg_pc_folder, netpcsize):
     for pointcloud in os.listdir(reg_pc_folder):
@@ -69,11 +83,31 @@ def remove_insufficient_pointclouds(reg_pc_folder, netpcsize):
             logging.info("Found pointcloud with %s/%s points. Removing it!", len(points), netpcsize)
             os.remove(os.path.join(reg_pc_folder, pointcloud))
 
+def get_base_filenames(folder, keyword):
+    """Returns a set of filenames with '_REG_' or '_FWF_' removed."""
+    return {f.replace(f"_{keyword}_", "_") for f in os.listdir(folder) if f.endswith('.laz')}
+
+def remove_unmatched_files(reg_folder, fwf_folder):
+    """Finds and removes files that do not have a counterpart in the other folder."""
+    reg_files = os.listdir(reg_folder)
+    fwf_files = os.listdir(fwf_folder)
+    reg_base = get_base_filenames(reg_folder, "REG")
+    fwf_base = get_base_filenames(fwf_folder, "FWF")
+    unmatched_reg = [f for f in reg_files if f.replace("_REG_", "_") not in fwf_base]
+    unmatched_fwf = [f for f in fwf_files if f.replace("_FWF_", "_") not in reg_base]
+    for file in unmatched_reg:
+        file_path = os.path.join(reg_folder, file)
+        os.remove(file_path)
+    for file in unmatched_fwf:
+        file_path = os.path.join(fwf_folder, file)
+        os.remove(file_path)
+
 def eliminate_unused_species_fwf(reg_pc_folder, fwf_pc_folder, elimination_percentage, netpcsize):
     pointclouds = select_pointclouds(reg_pc_folder)
     fwf_pointclouds = select_pointclouds(fwf_pc_folder)
     species_list = get_species_distribution_fwf(pointclouds, fwf_pointclouds)
     species_to_use, species_distribution = eliminate_underrepresented_species(species_list, elimination_percentage)
+    logging.info("Species to use: %s", species_to_use)
     pointclouds_dict = defaultdict(lambda: {"REG": None, "FWF": None})
     def extract_species(filename):
         return filename.split("_")[2]
@@ -198,6 +232,7 @@ def eliminate_underrepresented_species(species_list, user_spec_percentage):
     label_counts = Counter(species_list)
     for label, count in label_counts.items():
         percentage = calculate_percentage(count, len(species_list))
+        logging.info("Percentage for class %s: %s", label, percentage)
         if percentage >= user_spec_percentage:
             decently_represented_species.append(label)
             represented_species_distribution.append([label, count])
@@ -334,9 +369,11 @@ def augment_species_pointclouds_fwf(species_pc_pairs, max_representation, specie
     """
     pair_index = 0
     for species_pairs in species_pc_pairs:
+        # Retrieve augmentation upscaling species factor
         current_species = get_species_for_pairs_list(species_pairs)
         current_species_amount = get_abs_num(current_species, species_distribution)
         upscale_fac = get_upscale_factor(current_species_amount, max_representation)
+        # Filename separation and creation
         current_reg_pc = species_pairs[0]
         filename_reg_full = os.path.split(current_reg_pc)[1]
         filename_reg_ext = filename_reg_full.split(".")[-1]
@@ -349,32 +386,43 @@ def augment_species_pointclouds_fwf(species_pc_pairs, max_representation, specie
         filename_fwf_f = filename_fwf_full.split(".")[0]
         filenameparts_fwf = filename_fwf_f.split("_")[:-1]
         filename_fwf = filenameparts_fwf[0] + "_" + filenameparts_fwf[1] + "_" + filenameparts_fwf[2] + "_" + filenameparts_fwf[3] + "_" + filenameparts_fwf[4] + "_" + filenameparts_fwf[5] + "_" + filenameparts_fwf[6]
+        # Loading of las and FWF file
         reg_points, reg_pc = load_point_cloud_and_file(species_pairs[0])
         fwf_points, fwf_pc = load_point_cloud_and_file(species_pairs[1])
         logging.debug("Number of points reg: %s", len(reg_points))
         logging.debug("Number of points reg: %s", len(fwf_points))
+        # 4 augmentation loops
         for i in range(0, int(upscale_fac)*4):
             pair_index+=1
             outFile_r = lp.LasData(reg_pc.header)
             outFile_f = lp.LasData(fwf_pc.header)
             outFile_r.vlrs = reg_pc.vlrs
             outFile_f.vlrs = fwf_pc.vlrs
-            angle = pick_random_angle()
-            exported_points_reg = reg_points
-            exported_points_fwf = fwf_points
+            # Rotate point cloud by random angle
+            angle = pick_random_angle(i+1)
+            new_reg_points = reg_points
+            new_fwf_points = fwf_points
+            exported_points_reg = center_pointcloud_o3d(new_reg_points)
+            exported_points_fwf = center_pointcloud_o3d(new_fwf_points)
             rotated_reg_pc = rotate_point_cloud(exported_points_reg, angle)
             rotated_fwf_pc = rotate_point_cloud(exported_points_fwf, angle)
+            # Scale point cloud
             scale_factors = np.random.uniform(1 - max_scale, 1 + max_scale, size=3)
             scaled_rotated_reg_pc = scale_point_cloud(rotated_reg_pc, scale_factors)
             scaled_rotated_fwf_pc = scale_point_cloud(rotated_fwf_pc, scale_factors)
-            adjust_las_header(outFile_r, scaled_rotated_reg_pc)
-            adjust_las_header(outFile_f, scaled_rotated_fwf_pc)
-            outFile_r.x = scaled_rotated_reg_pc[:, 0]
-            outFile_r.y = scaled_rotated_reg_pc[:, 1]
-            outFile_r.z = scaled_rotated_reg_pc[:, 2]
-            outFile_f.x = scaled_rotated_fwf_pc[:, 0]
-            outFile_f.y = scaled_rotated_fwf_pc[:, 1]
-            outFile_f.z = scaled_rotated_fwf_pc[:, 2]
+            scaled_rotated_reg_pc += np.random.uniform(-0.0005, 0.0005, scaled_rotated_reg_pc.shape)
+            scaled_rotated_fwf_pc += np.random.uniform(-0.0005, 0.0005, scaled_rotated_fwf_pc.shape)
+            jittered_shuffled_reg_pc = np.random.permutation(scaled_rotated_reg_pc)
+            jittered_shuffled_fwf_pc = np.random.permutation(scaled_rotated_fwf_pc)
+            adjust_las_header(outFile_r, jittered_shuffled_reg_pc)
+            adjust_las_header(outFile_f, jittered_shuffled_fwf_pc)
+            outFile_r.x = jittered_shuffled_reg_pc[:, 0]
+            outFile_r.y = jittered_shuffled_reg_pc[:, 1]
+            outFile_r.z = jittered_shuffled_reg_pc[:, 2]
+            outFile_f.x = jittered_shuffled_fwf_pc[:, 0]
+            outFile_f.y = jittered_shuffled_fwf_pc[:, 1]
+            outFile_f.z = jittered_shuffled_fwf_pc[:, 2]
+            # Save augmented point clouds
             new_filename_reg = f"{filename_reg}_aug0{pair_index}{i}.{filename_reg_ext}"
             new_filename_fwf = f"{filename_fwf}_aug0{pair_index}{i}.{filename_fwf_ext}"
             savepath_reg = os.path.join(pc_path_selection, new_filename_reg)
@@ -385,6 +433,11 @@ def augment_species_pointclouds_fwf(species_pc_pairs, max_representation, specie
                 logging.debug("The pointcloud still has FWF data after augmentation!")
             else:
                 logging.debug("FWF data has been lost!")
+
+def center_pointcloud_o3d(pointcloud):
+    center = np.mean(pointcloud, axis=0)
+    centered_points = pointcloud - center
+    return np.asarray(centered_points)
 
 def get_species_for_pairs_list(species_pairs):
     """
@@ -451,15 +504,18 @@ def load_point_cloud_and_file(file_path):
         raise
     return points, las_file
 
-def pick_random_angle():
+def pick_random_angle(index):
     """
     Picks a random angle between 0 and 360 degrees, incements in 15 degree steps.
 
     Returns:
     random_angle: Generated angle in degrees.
     """
-    random_index = random.randint(1, 24)
-    random_angle = random_index * 15
+    if index <= 22:
+        random_angle = index * 15
+    else:
+        new_index = index - 22
+        random_angle = new_index * 15
     return random_angle
 
 def rotate_point_cloud(point_cloud, angle):
@@ -478,10 +534,9 @@ def rotate_point_cloud(point_cloud, angle):
                   [np.sin(angle_rad), np.cos(angle_rad), 0],
                   [0, 0, 1]])
     pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(point_cloud)
-    pcd.rotate(R, center=(0, 0, 0))
-    rotated_point_cloud = np.asarray(pcd.points)
-    return rotated_point_cloud
+    pcd.points = o3d.utility.Vector3dVector(point_cloud.copy())
+    pcd.rotate(R, center=pcd.get_center())
+    return np.asarray(pcd.points)
 
 def scale_point_cloud(point_cloud, scale_factors):
     """
@@ -505,16 +560,16 @@ def adjust_las_header(las, points):
     las: Las file instance.
     points: Array of point cloud points.
     """
+    # Calculate new offset and scale based on the data range
     min_x, max_x = np.min(points[:, 0]), np.max(points[:, 0])
     min_y, max_y = np.min(points[:, 1]), np.max(points[:, 1])
     min_z, max_z = np.min(points[:, 2]), np.max(points[:, 2])
     new_offset = [min_x, min_y, min_z]
-    new_scale = [(max_x - min_x) / (2**31 - 1), 
-                 (max_y - min_y) / (2**31 - 1), 
-                 (max_z - min_z) / (2**31 - 1)]
+    original_scale = np.array(las.header.scale)
+    # Update the header with new offset and scale
     las.header.offset = new_offset
-    las.header.scale = new_scale
-    logging.debug("Updated Scale: %s", new_scale)
+    las.header.scale = original_scale
+    logging.debug("Updated Scale: %s", original_scale)
     logging.debug("Updated Offset: %s", new_offset)
 
 def save_point_cloud(file_path, orig_las_file, outFile):
@@ -535,6 +590,30 @@ def save_point_cloud(file_path, orig_las_file, outFile):
         outFile.vlrs = orig_las_file.vlrs.copy()
         outFile.intensity = orig_las_file.intensity.copy()
         outFile.write(file_path)
+
+def get_colored_images_generated(las_working_folder, img_working_folder):
+    """
+    Checks if all images have been generated for each individual tree point cloud.
+
+    Args:
+    las_working_folder: Filepath to las point clouds.
+    img_working_folder: Savepath for generated images.
+
+    Returns:
+    True/False
+    """
+    las_list = []
+    img_list = []
+    for pointcloud in os.listdir(las_working_folder):
+        las_list.append(pointcloud)
+    for image in os.listdir(img_working_folder):
+        img_list.append(image)
+    imlistlength = len(img_list)/2
+    if imlistlength == len(las_list) or imlistlength > 0:
+        logging.info("Images have already been generated, skipping!")
+        return True
+    else:
+        return False
 
 def get_maximum_unscaled_image_size(las_working_folder, img_working_folder):
     """
@@ -561,7 +640,7 @@ def get_maximum_unscaled_image_size(las_working_folder, img_working_folder):
     else:
         return 0
 
-def generate_colored_images(IMG_SIZE, las_working_folder, img_working_folder, max_height, abs_max_img_size):
+def generate_colored_images(IMG_SIZE, las_working_folder, img_working_folder, abs_max_img_size):
     """
     Main utility function for the generation of colored depth images.
 
@@ -632,7 +711,7 @@ def create_voxel_grid_from_las(pointcloud):
     pcd_las_o3d.points = o3d.utility.Vector3dVector(points)
     R = pcd_las_o3d.get_rotation_matrix_from_xyz((-1.5, 0, 0))
     pcd_las_o3d.rotate(R, center=(0, 0, 0))
-    vox_grid = o3d.geometry.VoxelGrid.create_from_point_cloud(pcd_las_o3d, voxel_size=0.03)
+    vox_grid = o3d.geometry.VoxelGrid.create_from_point_cloud(pcd_las_o3d, voxel_size=0.04)
     absolute_height = np.max(points[:, 2]) - np.min(points[:, 2])
     return vox_grid, absolute_height
 
@@ -761,8 +840,8 @@ def save_colored_image(image, id, species, method, date, ind_id, leaf_cond, angl
     SAVE_DIR: Savepath for the image.
 
     """
-    colors = [(0, 0, 0)] + [plt.cm.jet(i / 255) for i in range(1, 256)]
-    custom_cmap = mcolors.ListedColormap(colors, name="custom_black_blue_red_yellow")
+    colors = [(0, 0, 0)] + [plt.cm.twilight(i / 255) for i in range(1, 256)]
+    custom_cmap = mcolors.ListedColormap(colors, name="custom_twilight")
     norm = plt.Normalize(vmin=image.min(), vmax=image.max())
     image = custom_cmap(norm(image))
     save_path = os.path.join(SAVE_DIR + "/" + str(id) + "_" + species + "_" + method + "_" + date + "_" + str(ind_id) + "_" + leaf_cond + "_" + angle + "_" + pcid + "_" + augnum + ".tiff")
@@ -2116,11 +2195,12 @@ def augment_species_pointclouds(species_pcs, max_representation, species_distrib
             rotated_pc = rotate_point_cloud(exported_points_pc, angle)
             scale_factors = np.random.uniform(1 - max_scale, 1 + max_scale, size=3)
             scaled_rotated_pc = scale_point_cloud(rotated_pc, scale_factors)
-            adjust_las_header(outFile_p, scaled_rotated_pc)
-            logging.debug("Number of points after transformation: %s", len(scaled_rotated_pc))
-            outFile_p.x = scaled_rotated_pc[:, 0]
-            outFile_p.y = scaled_rotated_pc[:, 1]
-            outFile_p.z = scaled_rotated_pc[:, 2]
+            scaled_rotated_pc += np.random.uniform(-0.0005, 0.0005, scaled_rotated_pc.shape)
+            jittered_shuffled_pc = np.random.permutation(scaled_rotated_pc)
+            adjust_las_header(outFile_p, jittered_shuffled_pc)
+            outFile_p.x = jittered_shuffled_pc[:, 0]
+            outFile_p.y = jittered_shuffled_pc[:, 1]
+            outFile_p.z = jittered_shuffled_pc[:, 2]
             new_filename_pc = filename_pc + "_" + "aug0" + str(pc_index) + str(i) + "." + pc_name_extension
             logging.info("Created point cloud %s!", new_filename_pc)
             savepath_pc = os.path.join(pc_path_selection + "/" + new_filename_pc)

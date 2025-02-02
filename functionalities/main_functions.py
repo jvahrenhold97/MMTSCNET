@@ -8,6 +8,8 @@ import time
 from keras_tuner import BayesianOptimization, Objective
 from keras.callbacks import ReduceLROnPlateau, LearningRateScheduler
 import keras
+from keras.losses import CategoricalCrossentropy
+from sklearn.model_selection import StratifiedShuffleSplit
 
 def extract_data(data_dir, work_dir, fwf_av, capsel, growsel):
     """
@@ -69,6 +71,7 @@ def preprocess_data(full_pathlist, ssstest, capsel, growsel, elimper, maxpcscale
         if workspace_setup.files_extracted(full_pathlist[10]) == 0:
             preprocessing.remove_insufficient_pointclouds_fwf(full_pathlist[6], full_pathlist[7], netpcsize*0.75)
             species_distribution = preprocessing.eliminate_unused_species_fwf(full_pathlist[6], full_pathlist[7], elimper, netpcsize)
+            preprocessing.remove_unmatched_files(full_pathlist[6], full_pathlist[7])
             preprocessing.move_pointclouds_to_preds_fwf(full_pathlist[6], full_pathlist[7], full_pathlist[10], full_pathlist[11])
         else:
             pointclouds = []
@@ -76,6 +79,7 @@ def preprocess_data(full_pathlist, ssstest, capsel, growsel, elimper, maxpcscale
                 pointclouds.append(file)
             species_list = preprocessing.get_species_distribution(pointclouds)
             species_to_use, species_distribution = preprocessing.eliminate_underrepresented_species(species_list, 0.0)
+            preprocessing.remove_unmatched_files(full_pathlist[6], full_pathlist[7])
 
         logging.info("Gathering point clouds...")
         unaugmented_regular_pointclouds = preprocessing.select_pointclouds(full_pathlist[6])
@@ -104,10 +108,10 @@ def preprocess_data(full_pathlist, ssstest, capsel, growsel, elimper, maxpcscale
         logging.info("New shape of combined_metrics_all_pred: %s", combined_metrics_all_pred_cleaned.shape)
 
         logging.info("Generating images...")
-        max_img_size_reg = preprocessing.get_maximum_unscaled_image_size(full_pathlist[6], full_pathlist[8])
-        preprocessing.generate_colored_images(netimgsize, full_pathlist[6], full_pathlist[8], max_crown_height, max_img_size_reg)
-        max_img_size_pred = preprocessing.get_maximum_unscaled_image_size(full_pathlist[10], full_pathlist[12])
-        preprocessing.generate_colored_images(netimgsize, full_pathlist[10], full_pathlist[12], max_crown_height_pred, max_img_size_pred)
+        max_height = preprocessing.get_maximum_unscaled_image_size(full_pathlist[6], full_pathlist[8])
+        preprocessing.generate_colored_images(netimgsize, full_pathlist[6], full_pathlist[8], max_height)
+        max_height_pred = preprocessing.get_maximum_unscaled_image_size(full_pathlist[10], full_pathlist[12])
+        preprocessing.generate_colored_images(netimgsize, full_pathlist[10], full_pathlist[12], max_height_pred)
 
         selected_pointclouds_augmented, selected_fwf_pointclouds_augmented, selected_images_augmented = preprocessing.get_user_specified_data_fwf(full_pathlist[6], full_pathlist[7], full_pathlist[8], capsel, growsel)
         selected_pointclouds_pred_augmented, selected_fwf_pointclouds_pred_augmented, selected_images_pred_augmented = preprocessing.get_user_specified_data_fwf(full_pathlist[10], full_pathlist[11], full_pathlist[12], capsel, growsel)
@@ -162,10 +166,10 @@ def preprocess_data(full_pathlist, ssstest, capsel, growsel, elimper, maxpcscale
         logging.info("New shape of combined_metrics_all_pred: %s", combined_metrics_all_pred_cleaned.shape)
 
         logging.info("Generating images...")
-        max_img_size_reg = preprocessing.get_maximum_unscaled_image_size(full_pathlist[4], full_pathlist[5])
-        preprocessing.generate_colored_images(netimgsize, full_pathlist[4], full_pathlist[5], max_crown_height, max_img_size_reg)
-        max_img_size_pred = preprocessing.get_maximum_unscaled_image_size(full_pathlist[7], full_pathlist[8])
-        preprocessing.generate_colored_images(netimgsize, full_pathlist[7], full_pathlist[8], max_crown_height_pred, max_img_size_pred)
+        max_height = preprocessing.get_maximum_unscaled_image_size(full_pathlist[4], full_pathlist[5])
+        preprocessing.generate_colored_images(netimgsize, full_pathlist[4], full_pathlist[5], max_height)
+        max_height_pred = preprocessing.get_maximum_unscaled_image_size(full_pathlist[7], full_pathlist[8])
+        preprocessing.generate_colored_images(netimgsize, full_pathlist[7], full_pathlist[8], max_height_pred)
 
         selected_pointclouds_augmented, selected_images_augmented = preprocessing.get_user_specified_data(full_pathlist[4], full_pathlist[5], capsel, growsel)
         selected_pointclouds_pred_augmented, selected_images_pred_augmented = preprocessing.get_user_specified_data(full_pathlist[7], full_pathlist[8], capsel, growsel)
@@ -215,8 +219,8 @@ def perform_hp_tuning(model_dir, X_pc_train, X_img_1_train, X_img_2_train, X_met
     image_shape = (netimgsize, netimgsize, 3)
     metrics_shape = (X_metrics_train.shape[1],)
     batch_size = bsize
-    num_hp_epochs = 5
-    num_hp_trials = 7
+    num_hp_epochs = 7
+    num_hp_trials = 8
     os.chdir(model_dir)
     # Clear the backend to free up memory
     tf.keras.backend.clear_session()
@@ -231,8 +235,6 @@ def perform_hp_tuning(model_dir, X_pc_train, X_img_1_train, X_img_2_train, X_met
     corruption_found = model_utils.check_label_corruption(y_val)
     if not corruption_found:
         logging.info("No corruption found in one-hot encoded labels!")
-    logging.info(f"Distribution in training data: {model_utils.get_class_distribution(y_train)}")
-    logging.info(f"Distribution in testing data: {model_utils.get_class_distribution(y_val)}")
     # Define data generators to feed data during hyperparameter tuning
     train_gen = model_utils.DataGenerator(X_pc_train, X_img_1_train, X_img_2_train, X_metrics_train, y_train, batch_size)
     val_gen = model_utils.DataGenerator(X_pc_val, X_img_1_val, X_img_2_val, X_metrics_val, y_val, batch_size)
@@ -242,14 +244,14 @@ def perform_hp_tuning(model_dir, X_pc_train, X_img_1_train, X_img_2_train, X_met
     # Define name for hyperparameter saving folder
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     if fwf_av == True:
-        dir_name = f'hp-tuning-fwf_{capsel}_{growsel}_{netpcsize}_{timestamp}'
+        dir_name = f'hp-tuning-fwf_{capsel}_{growsel}_{netpcsize}_{num_classes}_{timestamp}'
     else:
-        dir_name = f'hp-tuning_{capsel}_{growsel}_{netpcsize}_{timestamp}'
+        dir_name = f'hp-tuning_{capsel}_{growsel}_{netpcsize}_{num_classes}_{timestamp}'
     # Definition of instance of the BayesianOptimization Keras tuner
     tuner = BayesianOptimization(
         model_utils.CombinedModel(point_cloud_shape, image_shape, metrics_shape, num_classes, netpcsize),
         # Validation custom metric as objective
-        objective=Objective("val_custom_metric", direction="max"),
+        objective=Objective("val_recall", direction="max"),
         max_trials=num_hp_trials,
         max_retries_per_trial=3,
         max_consecutive_failed_trials=3,
@@ -267,10 +269,9 @@ def perform_hp_tuning(model_dir, X_pc_train, X_img_1_train, X_img_2_train, X_met
                 epochs=num_hp_epochs,
                 validation_data=val_gen,
                 class_weight=model_utils.generate_class_weights(y_train),
-                callbacks=[reduce_lr, degrade_lr, macro_f1_callback, custom_scoring_callback])
+                callbacks=[reduce_lr, degrade_lr])
     # Retrieve best hyperparameter configuration of the tuning process
     best_hyperparameters = tuner.get_best_hyperparameters(num_trials=1)[0]
-    logging.info(f"Best Hyperparameters: {best_hyperparameters}")
     optimal_learning_rate = best_hyperparameters.get('learning_rate')
     logging.info(f"Optimal Learning Rate: {optimal_learning_rate}")
     # Create instance of MMTSCNet with optimal hyperparameters
@@ -312,7 +313,7 @@ def perform_training(model, bsz, X_pc_train, X_img_1_train, X_img_2_train, X_met
     # Compilation of the tuned model with learning rate and training matrics
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=optimal_learning_rate, clipnorm=1.0),
-        loss='categorical_crossentropy',
+        loss=CategoricalCrossentropy(label_smoothing=0.05),
         metrics=['accuracy', tf.keras.metrics.Precision(name="precision"), tf.keras.metrics.Recall(name="recall"), tf.keras.metrics.AUC(name="pr_curve", curve="PR"), tf.keras.metrics.PrecisionAtRecall(0.85, name="pr_at_rec"), tf.keras.metrics.RecallAtPrecision(0.85, name="rec_at_pr")]
     )
     # Print model summary
@@ -339,20 +340,18 @@ def perform_training(model, bsz, X_pc_train, X_img_1_train, X_img_2_train, X_met
     train_gen.on_epoch_end()
     val_gen.on_epoch_end()
     # Callback definition
-    early_stopping = tf.keras.callbacks.EarlyStopping(monitor='val_accuracy', patience=15, restore_best_weights=True)
-    reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(monitor='val_accuracy', factor=0.95, patience=3, min_lr=1e-6)
+    early_stopping = tf.keras.callbacks.EarlyStopping(monitor='val_accuracy', patience=7, restore_best_weights=True)
+    reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(monitor='val_accuracy', factor=0.95, patience=5, min_lr=5e-7)
     degrade_lr = tf.keras.callbacks.LearningRateScheduler(model_utils.scheduler)
     macro_f1_callback = model_utils.MacroF1ScoreCallback(validation_data=val_gen, batch_size=bsz)
     custom_scoring_callback = model_utils.WeightedResultsCallback(validation_data=val_gen, batch_size=bsz)
-    logging.info(f"Distribution in training data: {model_utils.get_class_distribution(y_train)}")
-    logging.info(f"Distribution in testing data: {model_utils.get_class_distribution(y_val)}")
     # Model training setup with 300 epochs and early stopping
     history = model.fit(
         train_gen,
         epochs=150,
         validation_data=val_gen,
         class_weight=model_utils.generate_class_weights(y_train),
-        callbacks=[early_stopping, reduce_lr, degrade_lr, macro_f1_callback, custom_scoring_callback],
+        callbacks=[early_stopping, reduce_lr, degrade_lr],
         verbose=1
     )
     # Plot training metrics as graphs
@@ -379,11 +378,12 @@ def perform_training(model, bsz, X_pc_train, X_img_1_train, X_img_2_train, X_met
     gc.collect()
     return trained_model, plot_path
 
-def build_mmtscnet_with_optimal_hps(netpcsize, netimgsize, num_classes, cap_sel, grow_sel, fwf_av, X_metrics_train):
+def build_mmtscnet_with_optimal_hps(netpcsize, netimgsize, num_classes, cap_sel, grow_sel, fwf_av, X_metrics_train, modeldir):
     point_cloud_shape = (netpcsize, 3)
     image_shape = (netimgsize, netimgsize, 3)
     metrics_shape = (X_metrics_train.shape[1],)
-    best_hyperparameters = predef_mmtscnet.get_hyperparams_for_config(num_classes, cap_sel, grow_sel, fwf_av)
+    best_hyperparameters, optimal_lr = predef_mmtscnet.get_hyperparams_for_config(num_classes, cap_sel, grow_sel, fwf_av, point_cloud_shape, image_shape, metrics_shape, netpcsize, modeldir)
     combined_model = model_utils.CombinedModel(point_cloud_shape, image_shape, metrics_shape, num_classes, netpcsize)
     untrained_model = combined_model.get_untrained_model(best_hyperparameters)
     untrained_model.summary()
+    return untrained_model, optimal_lr
