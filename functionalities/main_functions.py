@@ -69,8 +69,10 @@ def preprocess_data(full_pathlist, ssstest, capsel, growsel, elimper, maxpcscale
     if fwf_av == True:
         logging.info("Creating Test-Set and removing underrepresented species...")
         if workspace_setup.files_extracted(full_pathlist[10]) == 0:
-            preprocessing.remove_insufficient_pointclouds_fwf(full_pathlist[6], full_pathlist[7], netpcsize*0.75)
+            preprocessing.remove_insufficient_pointclouds_fwf(full_pathlist[6], full_pathlist[7], netpcsize)
             species_distribution = preprocessing.eliminate_unused_species_fwf(full_pathlist[6], full_pathlist[7], elimper, netpcsize)
+            preprocessing.remove_height_outliers_fwf(full_pathlist[6], full_pathlist[7])
+            logging.info("Species distribution: %s", species_distribution)
             preprocessing.remove_unmatched_files(full_pathlist[6], full_pathlist[7])
             preprocessing.move_pointclouds_to_preds_fwf(full_pathlist[6], full_pathlist[7], full_pathlist[10], full_pathlist[11])
         else:
@@ -99,8 +101,9 @@ def preprocess_data(full_pathlist, ssstest, capsel, growsel, elimper, maxpcscale
         resampled_pointclouds_pred = preprocessing.resample_pointclouds_fps(selected_pointclouds_pred_augmented, netpcsize)
 
         logging.info("Generating metrics for point clouds...")
-        combined_metrics_all, feature_names, eliminated_features, max_crown_height = preprocessing.generate_metrics_for_selected_pointclouds_fwf(selected_pointclouds_augmented, selected_fwf_pointclouds_augmented, full_pathlist[9], capsel, growsel, [])
-        combined_metrics_all_pred, feature_names_pred, elim_features, max_crown_height_pred = preprocessing.generate_metrics_for_selected_pointclouds_fwf(selected_pointclouds_pred_augmented, selected_fwf_pointclouds_pred_augmented, full_pathlist[13], capsel, growsel, eliminated_features)
+        combined_metrics_all, feature_names, eliminated_features = preprocessing.generate_metrics_for_selected_pointclouds_fwf(selected_pointclouds_augmented, selected_fwf_pointclouds_augmented, full_pathlist[9], capsel, growsel, [])
+        combined_metrics_all_pred, feature_names_pred, elim_features = preprocessing.generate_metrics_for_selected_pointclouds_fwf(selected_pointclouds_pred_augmented, selected_fwf_pointclouds_pred_augmented, full_pathlist[13], capsel, growsel, eliminated_features)
+        logging.info("Kept features: %s", feature_names)
         combined_metrics_all_cleaned, combined_metrics_all_pred_cleaned, dropped_cols = preprocessing.drop_nan_columns(combined_metrics_all, combined_metrics_all_pred)
         logging.info("Dropped columns indices: %s", dropped_cols)
         feature_names_cleaned = [name for i, name in enumerate(feature_names) if i not in dropped_cols]
@@ -126,13 +129,14 @@ def preprocess_data(full_pathlist, ssstest, capsel, growsel, elimper, maxpcscale
         print(images_front.shape, images_side.shape, images_front_pred.shape, images_side_pred.shape)
 
         logging.info("Creating final Training-, Validation- and Test-Set...")
-        X_pc_train, X_pc_val, X_pc_pred, X_metrics_train, X_metrics_val, X_metrics_pred, X_img_1_train, X_img_1_val, X_img_1_pred, X_img_2_train, X_img_2_val, X_img_2_pred, y_train, y_val, y_pred, num_classes, label_dict = preprocessing.generate_training_data(capsel, growsel, selected_pointclouds_augmented, resampled_pointclouds, selected_pointclouds_pred_augmented, resampled_pointclouds_pred, combined_metrics_all_cleaned, combined_metrics_all_pred_cleaned, images_front, images_side, images_front_pred, images_side_pred, ssstest, full_pathlist[9], full_pathlist[13], 0.008, feature_names_cleaned)
+        X_pc_train, X_pc_val, X_pc_pred, X_metrics_train, X_metrics_val, X_metrics_pred, X_img_1_train, X_img_1_val, X_img_1_pred, X_img_2_train, X_img_2_val, X_img_2_pred, y_train, y_val, y_pred, num_classes, label_dict = preprocessing.generate_training_data(capsel, growsel, selected_pointclouds_augmented, resampled_pointclouds, selected_pointclouds_pred_augmented, resampled_pointclouds_pred, combined_metrics_all_cleaned, combined_metrics_all_pred_cleaned, images_front, images_side, images_front_pred, images_side_pred, ssstest, full_pathlist[9], full_pathlist[13], 0.005, feature_names_cleaned)
         return X_pc_train, X_pc_val, X_pc_pred, X_metrics_train, X_metrics_val, X_metrics_pred, X_img_1_train, X_img_1_val, X_img_1_pred, X_img_2_train, X_img_2_val, X_img_2_pred, y_train, y_val, y_pred, num_classes, label_dict
     else:
         logging.info("Creating Test-Set and removing underrepresented species...")
         if workspace_setup.files_extracted(full_pathlist[7]) == 0:
-            preprocessing.remove_insufficient_pointclouds(full_pathlist[4], netpcsize*0.75)
+            preprocessing.remove_insufficient_pointclouds(full_pathlist[4], netpcsize)
             species_distribution = preprocessing.eliminate_unused_species(full_pathlist[4], elimper, netpcsize)
+            preprocessing.remove_height_outliers(full_pathlist[4])
             preprocessing.move_pointclouds_to_preds(full_pathlist[4], full_pathlist[7])
         else:
             pointclouds = []
@@ -157,8 +161,8 @@ def preprocess_data(full_pathlist, ssstest, capsel, growsel, elimper, maxpcscale
         resampled_pointclouds_pred = preprocessing.resample_pointclouds_fps(selected_pointclouds_pred_augmented, netpcsize)
 
         logging.info("Generating metrics for point clouds...")
-        combined_metrics_all, feature_names, eliminated_features, max_crown_height = preprocessing.generate_metrics_for_selected_pointclouds(selected_pointclouds_augmented, full_pathlist[6], capsel, growsel, [])
-        combined_metrics_all_pred, feature_names_pred, elim_features_pred, max_crown_height_pred = preprocessing.generate_metrics_for_selected_pointclouds(selected_pointclouds_pred_augmented, full_pathlist[9], capsel, growsel, eliminated_features)
+        combined_metrics_all, feature_names, eliminated_features = preprocessing.generate_metrics_for_selected_pointclouds(selected_pointclouds_augmented, full_pathlist[6], capsel, growsel, [])
+        combined_metrics_all_pred, feature_names_pred, elim_features_pred = preprocessing.generate_metrics_for_selected_pointclouds(selected_pointclouds_pred_augmented, full_pathlist[9], capsel, growsel, eliminated_features)
         combined_metrics_all_cleaned, combined_metrics_all_pred_cleaned, dropped_cols = preprocessing.drop_nan_columns(combined_metrics_all, combined_metrics_all_pred)
         logging.info("Dropped columns indices: %s", dropped_cols)
         feature_names_cleaned = [name for i, name in enumerate(feature_names) if i not in dropped_cols]
@@ -184,7 +188,7 @@ def preprocess_data(full_pathlist, ssstest, capsel, growsel, elimper, maxpcscale
         print(images_front.shape, images_side.shape, images_front_pred.shape, images_side_pred.shape)
 
         logging.info("Creating final Training-, Validation- and Test-Set...")
-        X_pc_train, X_pc_val, X_pc_pred, X_metrics_train, X_metrics_val, X_metrics_pred, X_img_1_train, X_img_1_val, X_img_1_pred, X_img_2_train, X_img_2_val, X_img_2_pred, y_train, y_val, y_pred, num_classes, label_dict = preprocessing.generate_training_data(capsel, growsel, selected_pointclouds_augmented, resampled_pointclouds, selected_pointclouds_pred_augmented, resampled_pointclouds_pred, combined_metrics_all_cleaned, combined_metrics_all_pred_cleaned, images_front, images_side, images_front_pred, images_side_pred, ssstest, full_pathlist[6], full_pathlist[9], 0.008, feature_names_cleaned)
+        X_pc_train, X_pc_val, X_pc_pred, X_metrics_train, X_metrics_val, X_metrics_pred, X_img_1_train, X_img_1_val, X_img_1_pred, X_img_2_train, X_img_2_val, X_img_2_pred, y_train, y_val, y_pred, num_classes, label_dict = preprocessing.generate_training_data(capsel, growsel, selected_pointclouds_augmented, resampled_pointclouds, selected_pointclouds_pred_augmented, resampled_pointclouds_pred, combined_metrics_all_cleaned, combined_metrics_all_pred_cleaned, images_front, images_side, images_front_pred, images_side_pred, ssstest, full_pathlist[6], full_pathlist[9], 0.005, feature_names_cleaned)
         return X_pc_train, X_pc_val, X_pc_pred, X_metrics_train, X_metrics_val, X_metrics_pred, X_img_1_train, X_img_1_val, X_img_1_pred, X_img_2_train, X_img_2_val, X_img_2_pred, y_train, y_val, y_pred, num_classes, label_dict
     
 def perform_hp_tuning(model_dir, X_pc_train, X_img_1_train, X_img_2_train, X_metrics_train, y_train, X_pc_val, X_img_1_val, X_img_2_val, X_metrics_val, y_val, bsize, netpcsize, netimgsize, num_classes, capsel, growsel, fwf_av):
@@ -214,13 +218,16 @@ def perform_hp_tuning(model_dir, X_pc_train, X_img_1_train, X_img_2_train, X_met
     Returns:
     untrained_model: Keras model instance of MMTSCNet with tuned hyperparameters.
     """
+    gpus = tf.config.experimental.list_physical_devices('GPU')
+    for gpu in gpus:
+        tf.config.experimental.set_memory_growth(gpu, True)
     # Initial definition of variables
     point_cloud_shape = (netpcsize, 3)
     image_shape = (netimgsize, netimgsize, 3)
     metrics_shape = (X_metrics_train.shape[1],)
     batch_size = bsize
-    num_hp_epochs = 7
-    num_hp_trials = 8
+    num_hp_epochs = 8
+    num_hp_trials = 5
     os.chdir(model_dir)
     # Clear the backend to free up memory
     tf.keras.backend.clear_session()
@@ -259,17 +266,14 @@ def perform_hp_tuning(model_dir, X_pc_train, X_img_1_train, X_img_2_train, X_met
         project_name='tree_classification'
     )
     # Definition of learning rate schedule and Callbacks
-    reduce_lr = ReduceLROnPlateau(monitor='val_accuracy', factor=0.995, patience=5, min_lr=5e-7)
     degrade_lr = LearningRateScheduler(model_utils.scheduler)
-    macro_f1_callback = model_utils.MacroF1ScoreCallback(validation_data=val_gen, batch_size=batch_size)
-    custom_scoring_callback = model_utils.WeightedResultsCallback(validation_data=val_gen, batch_size=batch_size)
     logging.info(f"Commencing hyperparameter-tuning for {num_hp_trials} trials with {num_hp_epochs} epochs!")
     # Tuning for the data with class-weights
     tuner.search(train_gen,
                 epochs=num_hp_epochs,
                 validation_data=val_gen,
-                class_weight=model_utils.generate_class_weights(y_train),
-                callbacks=[reduce_lr, degrade_lr])
+                #class_weight=model_utils.generate_class_weights(y_train),
+                callbacks=[degrade_lr])
     # Retrieve best hyperparameter configuration of the tuning process
     best_hyperparameters = tuner.get_best_hyperparameters(num_trials=1)[0]
     optimal_learning_rate = best_hyperparameters.get('learning_rate')
@@ -310,9 +314,12 @@ def perform_training(model, bsz, X_pc_train, X_img_1_train, X_img_2_train, X_met
     trained_model: Keras model instance of the trained MMTSCNet.
     """
     tf.keras.utils.set_random_seed(812)
+    gpus = tf.config.experimental.list_physical_devices('GPU')
+    for gpu in gpus:
+        tf.config.experimental.set_memory_growth(gpu, True)
     # Compilation of the tuned model with learning rate and training matrics
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=optimal_learning_rate, clipnorm=1.0),
+        optimizer=tf.keras.optimizers.Adam(learning_rate=optimal_learning_rate, clipnorm=0.5),
         loss=CategoricalCrossentropy(label_smoothing=0.05),
         metrics=['accuracy', tf.keras.metrics.Precision(name="precision"), tf.keras.metrics.Recall(name="recall"), tf.keras.metrics.AUC(name="pr_curve", curve="PR"), tf.keras.metrics.PrecisionAtRecall(0.85, name="pr_at_rec"), tf.keras.metrics.RecallAtPrecision(0.85, name="rec_at_pr")]
     )
@@ -340,18 +347,15 @@ def perform_training(model, bsz, X_pc_train, X_img_1_train, X_img_2_train, X_met
     train_gen.on_epoch_end()
     val_gen.on_epoch_end()
     # Callback definition
-    early_stopping = tf.keras.callbacks.EarlyStopping(monitor='val_accuracy', patience=7, restore_best_weights=True)
-    reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(monitor='val_accuracy', factor=0.95, patience=5, min_lr=5e-7)
+    early_stopping = tf.keras.callbacks.EarlyStopping(monitor='val_accuracy', patience=12, restore_best_weights=True)
     degrade_lr = tf.keras.callbacks.LearningRateScheduler(model_utils.scheduler)
-    macro_f1_callback = model_utils.MacroF1ScoreCallback(validation_data=val_gen, batch_size=bsz)
-    custom_scoring_callback = model_utils.WeightedResultsCallback(validation_data=val_gen, batch_size=bsz)
     # Model training setup with 300 epochs and early stopping
     history = model.fit(
         train_gen,
-        epochs=150,
+        epochs=300,
         validation_data=val_gen,
-        class_weight=model_utils.generate_class_weights(y_train),
-        callbacks=[early_stopping, reduce_lr, degrade_lr],
+        #class_weight=model_utils.generate_class_weights(y_train),
+        callbacks=[early_stopping, degrade_lr],
         verbose=1
     )
     # Plot training metrics as graphs

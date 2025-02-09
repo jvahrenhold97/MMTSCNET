@@ -12,8 +12,6 @@ from collections import Counter
 from scipy.spatial import KDTree, ConvexHull
 from scipy.stats import kurtosis, skew
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.feature_selection import f_classif
-import random
 from utils import main_utils
 import logging
 from functionalities import workspace_setup
@@ -25,7 +23,9 @@ from scipy.stats import entropy
 import matplotlib.colors as mcolors
 import multiprocessing as mp
 import sys
-import keras
+from tqdm import tqdm
+from sklearn.cluster import KMeans
+from scipy.spatial.distance import cdist
 
 def load_and_center(file):
     """Loads and centers a point cloud."""
@@ -35,14 +35,22 @@ def load_and_center(file):
     return center_point_cloud([point_cloud])[0]
 
 def resample_single(args):
-    """Resamples a single point cloud."""
+    """Resamples a single point cloud and ensures it has the correct shape."""
     point_cloud, netpcsize, idx = args
-    logging.info(f"Resampling point cloud {idx}")
-    sys.stdout.flush()
-    return resample_pointcloud(point_cloud, netpcsize, idx)
+    try:
+        resampled_pc = resample_pointcloud(point_cloud, netpcsize, idx)  # Your resampling function
+        # Ensure it returns a valid NumPy array
+        if not isinstance(resampled_pc, np.ndarray):
+            raise ValueError(f"Point cloud {idx} returned non-array type {type(resampled_pc)}")
+        # Ensure shape consistency
+        if resampled_pc.shape != (netpcsize, 3):
+            raise ValueError(f"Point cloud {idx} has shape {resampled_pc.shape}, expected ({netpcsize}, 3)")
+        return resampled_pc
+    except Exception as e:
+        raise ValueError(f"Error resampling point cloud {idx}: {e}")
 
-def resample_pointclouds_fps(selected_pointclouds, netpcsize, num_workers=None):
-    num_workers = num_workers or mp.cpu_count()//2
+def resample_pointclouds_fps(selected_pointclouds, netpcsize):
+    num_workers = mp.cpu_count()//2
     with mp.Pool(processes=num_workers) as pool:
         centered_pointclouds = pool.map(load_and_center, selected_pointclouds)
     logging.info("Centered a set of %s pointclouds", len(centered_pointclouds))
@@ -83,6 +91,125 @@ def remove_insufficient_pointclouds(reg_pc_folder, netpcsize):
             logging.info("Found pointcloud with %s/%s points. Removing it!", len(points), netpcsize)
             os.remove(os.path.join(reg_pc_folder, pointcloud))
 
+def remove_height_outliers(reg_pc_folder):
+    """
+    Removes point clouds whose height is beyond mean_height ± 0.85 * std_dev for their species.
+    Args:
+        reg_pc_folder (str): Path to the folder containing regular .laz files.
+    Returns:
+        None
+    """
+    species_heights = {}
+    for pointcloud in os.listdir(reg_pc_folder):
+        if not pointcloud.endswith(".laz"):
+            continue
+        parts = pointcloud.split("_")
+        if len(parts) < 3:
+            continue
+        reg_species = parts[2]
+        file_path = os.path.join(reg_pc_folder, pointcloud)
+        try:
+            las_file = lp.read(file_path)
+            points = np.vstack((las_file.x, las_file.y, las_file.z)).T
+            tree_height = np.max(points[:, 2]) - np.min(points[:, 2])
+            if reg_species not in species_heights:
+                species_heights[reg_species] = []
+            species_heights[reg_species].append(tree_height)
+        except Exception as e:
+            logging.warning(f"Error processing {pointcloud}: {e}")
+    species_stats = {
+        species: (np.mean(heights), np.std(heights))
+        for species, heights in species_heights.items() if len(heights) > 0
+    }
+    for pointcloud in os.listdir(reg_pc_folder):
+        if not pointcloud.endswith(".laz"):
+            continue
+        parts = pointcloud.split("_")
+        if len(parts) < 3:
+            continue
+        reg_species = parts[2]
+        file_path = os.path.join(reg_pc_folder, pointcloud)
+        if reg_species not in species_stats:
+            continue
+        try:
+            las_file = lp.read(file_path)
+            points = np.vstack((las_file.x, las_file.y, las_file.z)).T
+            tree_height = np.max(points[:, 2]) - np.min(points[:, 2])
+            mean_height, std_dev = species_stats[reg_species]
+            lower_bound = mean_height - 0.85 * std_dev
+            upper_bound = mean_height + 0.85 * std_dev
+            if tree_height < lower_bound or tree_height > upper_bound:
+                logging.info(f"Removing outlier: {pointcloud} (Height: {tree_height:.2f}, Allowed: {lower_bound:.2f} - {upper_bound:.2f})")
+                os.remove(file_path)
+        except Exception as e:
+            logging.warning(f"Error processing {pointcloud}: {e}")
+
+def remove_height_outliers_fwf(reg_pc_folder, fwf_pc_folder):
+    """
+    Removes point clouds whose height is beyond mean_height ± 0.85 * std_dev for their species.
+    Args:
+        reg_pc_folder (str): Path to the folder containing regular .laz files.
+        fwf_pc_folder (str): Path to the folder containing FWF .laz files.
+    Returns:
+        None
+    """
+    species_heights = {}
+    for pointcloud in os.listdir(reg_pc_folder):
+        if not pointcloud.endswith(".laz"):
+            continue
+        parts = pointcloud.split("_")
+        if len(parts) < 3:
+            continue
+        reg_species = parts[2]
+        file_path = os.path.join(reg_pc_folder, pointcloud)
+        try:
+            las_file = lp.read(file_path)
+            points = np.vstack((las_file.x, las_file.y, las_file.z)).T
+            tree_height = np.max(points[:, 2]) - np.min(points[:, 2])
+            if reg_species not in species_heights:
+                species_heights[reg_species] = []
+            species_heights[reg_species].append(tree_height)
+        except Exception as e:
+            logging.warning(f"Error processing {pointcloud}: {e}")
+    species_stats = {
+        species: (np.mean(heights), np.std(heights))
+        for species, heights in species_heights.items() if len(heights) > 0
+    }
+    for pointcloud in os.listdir(reg_pc_folder):
+        if not pointcloud.endswith(".laz"):
+            continue
+        parts = pointcloud.split("_")
+        if len(parts) < 3:
+            continue
+        reg_id = parts[0]
+        reg_species = parts[2]
+        file_path = os.path.join(reg_pc_folder, pointcloud)
+        if reg_species not in species_stats:
+            continue
+        try:
+            las_file = lp.read(file_path)
+            points = np.vstack((las_file.x, las_file.y, las_file.z)).T
+            tree_height = np.max(points[:, 2]) - np.min(points[:, 2])
+            mean_height, std_dev = species_stats[reg_species]
+            lower_bound = mean_height - 0.85 * std_dev
+            upper_bound = mean_height + 0.85 * std_dev
+            if tree_height < lower_bound or tree_height > upper_bound:
+                logging.info(f"Removing outlier: {pointcloud} (Height: {tree_height:.2f}, Allowed: {lower_bound:.2f} - {upper_bound:.2f})")
+                os.remove(file_path)
+                for fwf_pointcloud in os.listdir(fwf_pc_folder):
+                    fwf_parts = fwf_pointcloud.split("_")
+                    if len(fwf_parts) < 3:
+                        continue
+                    fwf_id = fwf_parts[0]
+                    fwf_species = fwf_parts[2]
+                    fwf_path = os.path.join(fwf_pc_folder, fwf_pointcloud)
+                    if reg_id == fwf_id and reg_species == fwf_species:
+                        logging.info(f"Removing corresponding FWF: {fwf_pointcloud}")
+                        os.remove(fwf_path)
+        except Exception as e:
+            logging.warning(f"Error processing {pointcloud}: {e}")
+
+
 def get_base_filenames(folder, keyword):
     """Returns a set of filenames with '_REG_' or '_FWF_' removed."""
     return {f.replace(f"_{keyword}_", "_") for f in os.listdir(folder) if f.endswith('.laz')}
@@ -107,6 +234,9 @@ def eliminate_unused_species_fwf(reg_pc_folder, fwf_pc_folder, elimination_perce
     fwf_pointclouds = select_pointclouds(fwf_pc_folder)
     species_list = get_species_distribution_fwf(pointclouds, fwf_pointclouds)
     species_to_use, species_distribution = eliminate_underrepresented_species(species_list, elimination_percentage)
+    species_to_use = ["CarBet", "FagSyl", "PicAbi", "PinSyl", "PseMen", "QuePet", "QueRub"]
+    #species_to_use = ["CarBet", "FagSyl", "PicAbi", "PseMen", "QuePet"]
+    #species_to_use = ["FagSyl", "PicAbi", "PseMen", "QuePet"]
     logging.info("Species to use: %s", species_to_use)
     pointclouds_dict = defaultdict(lambda: {"REG": None, "FWF": None})
     def extract_species(filename):
@@ -398,20 +528,33 @@ def augment_species_pointclouds_fwf(species_pc_pairs, max_representation, specie
             outFile_f = lp.LasData(fwf_pc.header)
             outFile_r.vlrs = reg_pc.vlrs
             outFile_f.vlrs = fwf_pc.vlrs
-            # Rotate point cloud by random angle
-            angle = pick_random_angle(i+1)
+            # === 1. Random Rotation ===
+            angle = pick_random_angle(np.random.randint(1, 360))
             new_reg_points = reg_points
             new_fwf_points = fwf_points
             exported_points_reg = center_pointcloud_o3d(new_reg_points)
             exported_points_fwf = center_pointcloud_o3d(new_fwf_points)
             rotated_reg_pc = rotate_point_cloud(exported_points_reg, angle)
             rotated_fwf_pc = rotate_point_cloud(exported_points_fwf, angle)
-            # Scale point cloud
+            # === 2. Random Scaling ===
             scale_factors = np.random.uniform(1 - max_scale, 1 + max_scale, size=3)
             scaled_rotated_reg_pc = scale_point_cloud(rotated_reg_pc, scale_factors)
             scaled_rotated_fwf_pc = scale_point_cloud(rotated_fwf_pc, scale_factors)
-            scaled_rotated_reg_pc += np.random.uniform(-0.0005, 0.0005, scaled_rotated_reg_pc.shape)
-            scaled_rotated_fwf_pc += np.random.uniform(-0.0005, 0.0005, scaled_rotated_fwf_pc.shape)
+            # === 3. Jitter ===
+            scaled_rotated_reg_pc += np.random.uniform(-0.045, 0.045, scaled_rotated_reg_pc.shape)
+            scaled_rotated_fwf_pc += np.random.uniform(-0.045, 0.045, scaled_rotated_fwf_pc.shape)
+            # === 4. Random Flipping ===
+            if np.random.rand() > 0.5:
+                scaled_rotated_reg_pc[:, 0] *= -1  # Flip XZ plane
+                scaled_rotated_fwf_pc[:, 0] *= -1
+            if np.random.rand() > 0.5:
+                scaled_rotated_reg_pc[:, 1] *= -1  # Flip YZ plane
+                scaled_rotated_fwf_pc[:, 1] *= -1
+            # === 5. Gaussian Noise ===
+            noise_std = 0.005  # 5mm standard deviation
+            scaled_rotated_reg_pc += np.random.normal(0, noise_std, scaled_rotated_reg_pc.shape)
+            scaled_rotated_fwf_pc += np.random.normal(0, noise_std, scaled_rotated_fwf_pc.shape)
+            # === 6. Random Shuffle Point Order ===
             jittered_shuffled_reg_pc = np.random.permutation(scaled_rotated_reg_pc)
             jittered_shuffled_fwf_pc = np.random.permutation(scaled_rotated_fwf_pc)
             adjust_las_header(outFile_r, jittered_shuffled_reg_pc)
@@ -465,10 +608,14 @@ def get_abs_num(species, species_distribution):
     Returns:
     abs_num: Absolute number of samples of the specified species in the dataset.
     """
+    abs_num = None
     for spec_num in species_distribution:
         current_spec = spec_num[0]
         if current_spec == species:
             abs_num = spec_num[1]
+            break
+    if abs_num is None:
+        raise ValueError(f"Species '{species}' not found in species_distribution!")
     return abs_num
 
 def get_upscale_factor(abs_num, max):
@@ -511,12 +658,7 @@ def pick_random_angle(index):
     Returns:
     random_angle: Generated angle in degrees.
     """
-    if index <= 22:
-        random_angle = index * 15
-    else:
-        new_index = index - 22
-        random_angle = new_index * 15
-    return random_angle
+    return index
 
 def rotate_point_cloud(point_cloud, angle):
     """
@@ -626,7 +768,7 @@ def get_maximum_unscaled_image_size(las_working_folder, img_working_folder):
     """
     if get_colored_images_generated(las_working_folder, img_working_folder) == False:
         image_sizes = []
-        for pointcloud in os.listdir(las_working_folder):
+        for pointcloud in tqdm(os.listdir(las_working_folder), desc="Computing max size and height:"):
             pointcloud_path = main_utils.join_paths(las_working_folder, pointcloud)
             pc = lp.read(pointcloud_path)
             voxels, abs_height = create_voxel_grid_from_las(pc)
@@ -665,7 +807,6 @@ def generate_colored_images(IMG_SIZE, las_working_folder, img_working_folder, ab
             vox_pos_list, max_img_size = get_voxel_positions(voxels)
             zero_frontal_image, zero_sideways_image = create_empty_images(max_img_size)
             frontal_image, sideways_image = fill_and_scale_empty_images(vox_pos_list, zero_frontal_image, zero_sideways_image)
-            
             save_voxelized_pointcloud_images(IMG_SIZE, frontal_image, sideways_image, tree_id, species, method, date, ind_id, leaf_cond, img_working_folder, zero_frontal_image, str(pcid), augnum, abs_max_img_size)
             pcid+=1
             logging.info("Generated frontal and sideways views of point cloud %s!", pcid)
@@ -720,7 +861,7 @@ def get_voxel_positions(voxel_grid):
     Gets indices for individual voxels.
 
     Args:
-    voxel_grid: Voxel grid with voxel size 0.03.
+    voxel_grid: Voxel grid.
 
     Returns:
     voxel_position_list: List of individual voxel positions.
@@ -750,42 +891,40 @@ def create_empty_images(maximum_image_size):
     empty_image_sideways = np.zeros((maximum_image_size, maximum_image_size), int)
     return empty_image_frontal, empty_image_sideways
 
-def fill_and_scale_empty_images(voxel_positions_list, empty_image_frontal, empty_image_sideways):
+def fill_and_scale_empty_images(voxel_positions_list, empty_image_frontal, empty_image_topdown):
     """
     Fills empty image arrays with values according to the voxel positions.
 
     Args:
     voxel_positions_list: List of individual voxel positions.
     empty_image_frontal: Zero-array of dimensions maximum_image_size X maximum_image_size
-    empty_image_sideways: Zero-array of dimensions maximum_image_size X maximum_image_size
+    empty_image_topdown: Zero-array of dimensions maximum_image_size X maximum_image_size
 
     Returns:
-    image_frontal: Unscaled image array of the frontal view.
-    image_sideways: Unscaled image array of the sideways view.
+    image_frontal: Corrected frontal view (Y-Z plane).
+    image_topdown: Corrected top-down view (X-Y plane).
     """
     for voxel_position in voxel_positions_list:
         voxel_position_x = voxel_position[0]
         voxel_position_y = voxel_position[1]
         voxel_position_z = voxel_position[2]
-        empty_image_frontal[voxel_position_x+1, voxel_position_y+1] = empty_image_frontal[voxel_position_x+1, voxel_position_y+1] + 1
-        empty_image_sideways[voxel_position_y+1, voxel_position_z+1] = empty_image_sideways[voxel_position_y+1, voxel_position_z+1] + 1
+        empty_image_frontal[voxel_position_y + 1, voxel_position_z + 1] += 1
+        empty_image_topdown[voxel_position_x + 1, voxel_position_z + 1] += 1
     image_frontal = np.interp(empty_image_frontal, (empty_image_frontal.min(), empty_image_frontal.max()), (0, 255))
-    image_frontal = np.rot90(image_frontal, k=3, axes=(1,0))
-    image_sideways = np.interp(empty_image_sideways, (empty_image_sideways.min(), empty_image_sideways.max()), (0, 255))
-    image_sideways = np.rot90(image_sideways, k=2, axes=(1,0))
-    return image_frontal, image_sideways
+    image_topdown = np.interp(empty_image_topdown, (empty_image_topdown.min(), empty_image_topdown.max()), (0, 255))
+    image_frontal = np.rot90(image_frontal, k=2, axes=(1, 0))  # Frontal (Y-Z)
+    image_topdown = np.rot90(image_topdown, k=1, axes=(1, 0))  # Top-down (X-Y)
+    return image_frontal, image_topdown
 
 def pad_image(img, pad_t, pad_r, pad_l):
     """
     Pads an image around all sides by the given amount of rows/columns of zeros.
-
     Args:
     img: Image array.
     pad_t: Top padding.
     pad_r: Right padding.
     pad_b: Bottom padding.
     pad_l: Left padding.
-
     Returns:
     img: Padded image array.
     """
@@ -798,34 +937,42 @@ def pad_image(img, pad_t, pad_r, pad_l):
     img = np.concatenate((img, pad_right), axis = 1)
     return img
 
-def center_image(img, abs_max_img_size):
+def center_image(img, abs_max_img_size, is_topdown=False):
     """
-    Crops and image to the contents bounding box and pads it to square dimensions.
-
+    Crops an image to its contents' bounding box and pads it to be centered.
+    - If `is_topdown` is False (frontal view), the object stays at the bottom.
+    - If `is_topdown` is True (top-down view), the object is fully centered.
     Args:
     img: Image array.
-    empty_image_frontal: Zero-array of the same dimensions.
-
+    abs_max_img_size: Absolute maximum image size for padding.
+    is_topdown: Boolean flag, True for top-down images.
     Returns:
-    padded_image: Padded image array, centered in the image frame.
+    centered_image: Image array properly centered.
     """
     col_sum = np.where(np.sum(img, axis=0) > 0)
     row_sum = np.where(np.sum(img, axis=1) > 0)
-    y1, y2 = row_sum[0][0], row_sum[0][-1]
-    x1, x2 = col_sum[0][0], col_sum[0][-1]
+    if len(row_sum[0]) == 0 or len(col_sum[0]) == 0:
+        return img
+    y1, y2 = row_sum[0][0], row_sum[0][-1] + 1
+    x1, x2 = col_sum[0][0], col_sum[0][-1] + 1
     cropped_image = img[y1:y2, x1:x2]
-    zero_axis_fill = (abs_max_img_size - cropped_image.shape[0])
-    one_axis_fill = (abs_max_img_size - cropped_image.shape[1])
-    top = zero_axis_fill
-    left = one_axis_fill / 2
-    right = one_axis_fill - left
-    padded_image = pad_image(cropped_image, top, left, right)
-    return padded_image
+    pad_left = (abs_max_img_size - cropped_image.shape[1]) // 2
+    pad_right = abs_max_img_size - cropped_image.shape[1] - pad_left
+    if is_topdown:
+        pad_top = (abs_max_img_size - cropped_image.shape[0]) // 2
+        pad_bottom = abs_max_img_size - cropped_image.shape[0] - pad_top
+    else:
+        pad_top = abs_max_img_size - cropped_image.shape[0]
+        pad_bottom = 0
+    centered_image = np.pad(
+        cropped_image, ((pad_top, pad_bottom), (pad_left, pad_right)), 
+        mode='constant', constant_values=0
+    )
+    return centered_image
 
 def save_colored_image(image, id, species, method, date, ind_id, leaf_cond, angle, pcid, augnum, SAVE_DIR):
     """
     Saves an image array as a .tiff file.
-
     Args:
     image: Image array.
     id: Tree id.
@@ -849,27 +996,14 @@ def save_colored_image(image, id, species, method, date, ind_id, leaf_cond, angl
     
 def save_voxelized_pointcloud_images(IMG_SIZE, image_frontal, image_sideways, id, species, method, date, ind_id, leaf_cond, SAVE_DIR, empty_image_frontal, pointcloud_id, augmentation_number, abs_max_img_size):
     """
-    Main utility function for the saving of the colored depth images.
-
-    Args:
-    IMG_SIZE: Network input image size (224).
-    image_frontal: Frontal image array.
-    image_sideways: Sideways image array.
-    id: Tree id.
-    species: Tree species of the source point cloud.
-    method: Capture method of the source point cloud.
-    date: Capture date of the source point cloud.
-    ind_id: Individual point cloud id.
-    leaf_cond: Leaf-condition of the source point cloud.
-    pointcloud_id: Point cloud id.
-    empty_image_frontal: Zero array of image array dimensions.
-    augnum: Augmentation number of the source point cloud.
-    SAVE_DIR: Savepath for the image.
+    Save frontal and top-down images with proper centering.
+    - Frontal image (Y-Z): No bottom padding.
+    - Top-down image (X-Y): Fully centered.
     """
-    image_frontal_to_save = center_image(image_frontal, abs_max_img_size)
+    image_frontal_to_save = center_image(image_frontal, abs_max_img_size, is_topdown=False)
     image_frontal_resized = cv2.resize(image_frontal_to_save, (IMG_SIZE, IMG_SIZE))
     save_colored_image(image_frontal_resized, id, species, method, date, ind_id, leaf_cond, "frontal", pointcloud_id, augmentation_number, SAVE_DIR)
-    image_sideways_to_save = center_image(image_sideways, abs_max_img_size)
+    image_sideways_to_save = center_image(image_sideways, abs_max_img_size, is_topdown=True)
     image_sideways_resized = cv2.resize(image_sideways_to_save, (IMG_SIZE, IMG_SIZE))
     save_colored_image(image_sideways_resized, id, species, method, date, ind_id, leaf_cond, "sideways", pointcloud_id, augmentation_number, SAVE_DIR)
     
@@ -1094,78 +1228,122 @@ def center_point_cloud(points_list):
         center_points.append(centered_points)
     return center_points
 
-def resample_pointcloud(pointcloud, target_num_points, iteration):
+def non_uniform_grid_partition(point_cloud, num_clusters=8):
     """
-    Resample a point cloud to a target number of points using non-uniform grid sampling
-    followed by farthest point sampling (FPS).
-
+    Partitions a point cloud into non-uniform grid cells using adaptive clustering (K-Means).
+    
     Args:
-        pointcloud (numpy.ndarray): Input point cloud as Nx3 array.
-        target_num_points (int): Target number of points.
-        iteration (int): Index of the point cloud to resample.
+        point_cloud (numpy array): N x 3 array of points.
+        num_clusters (int): Number of adaptive clusters.
 
     Returns:
-        numpy.ndarray: Resampled point cloud with target_num_points points.
+        cluster_labels (numpy array): Cluster labels for each point.
     """
-    num_points = pointcloud.shape[0]  # Ensure correct shape handling
-    method = "NONE"
-    if num_points > target_num_points:
-        sampled_pointcloud = farthest_point_sampling(pointcloud, target_num_points)
-        method = "FPS"
-    elif num_points < target_num_points:
-        extra_points_needed = target_num_points - num_points
-        interpolated_points = interpolate_points(pointcloud, extra_points_needed)
-        if interpolated_points.shape != (extra_points_needed, 3):
-            raise ValueError(f"Interpolation failed: expected ({extra_points_needed}, 3), got {interpolated_points.shape}")
-        sampled_pointcloud = np.vstack((pointcloud, interpolated_points))
-        method = "INTERP"
-    else:
-        sampled_pointcloud = pointcloud
-        method = "NONE"
-    logging.info(f"Resampled point cloud {iteration} using {method} from {num_points} points to {sampled_pointcloud.shape[0]} points")
-    return sampled_pointcloud
+    kmeans = KMeans(n_clusters=num_clusters, n_init=10, random_state=42)
+    cluster_labels = kmeans.fit_predict(point_cloud)
+    return cluster_labels
 
-
-def farthest_point_sampling(pointcloud, num_samples):
+def farthest_point_sampling(points, num_samples):
     """
-    Perform farthest point sampling (FPS) on a point cloud.
+    Applies standard Farthest Point Sampling (FPS) to a given point cloud.
 
     Args:
-        pointcloud (numpy.ndarray): Input point cloud as an Nx3 array.
+        points (numpy array): N x 3 array of points.
         num_samples (int): Number of points to sample.
 
     Returns:
-        numpy.ndarray: Sampled point cloud as a num_samplesx3 array.
+        sampled_points (numpy array): Downsampled N' x 3 point cloud.
     """
-    num_points = pointcloud.shape[0]
-    sampled_indices = [np.random.randint(0, num_points)]  # Start with a random point
-    distances = np.linalg.norm(pointcloud - pointcloud[sampled_indices[0]], axis=1)
-    for _ in range(1, num_samples):
-        farthest_point_idx = np.argmax(distances)
-        sampled_indices.append(farthest_point_idx)
-        new_distances = np.linalg.norm(pointcloud - pointcloud[farthest_point_idx], axis=1)
-        distances = np.minimum(distances, new_distances)
-    return pointcloud[sampled_indices]
+    farthest_pts = np.zeros((num_samples, 3))
+    farthest_pts[0] = points[np.random.randint(len(points))]  # Random first point
+    distances = cdist(points, farthest_pts[0].reshape(1, 3)).squeeze()
 
-def interpolate_points(pointcloud, extra_points_needed):
+    for i in range(1, num_samples):
+        idx = np.argmax(distances)  # Select farthest point
+        farthest_pts[i] = points[idx]
+        new_dist = cdist(points, farthest_pts[i].reshape(1, 3)).squeeze()
+        distances = np.minimum(distances, new_dist)  # Update min distances
+
+    return farthest_pts
+
+def resample_pointcloud(point_cloud, num_samples, iteration, num_clusters=8):
     """
-    Generate additional points by interpolating between randomly selected pairs of points.
+    Resamples a point cloud using Non-Uniform Grid Sampling + Farthest Point Sampling (NGFPS).
+    """
+    cluster_labels = non_uniform_grid_partition(point_cloud, num_clusters)
+    sampled_points = []
+    total_points_collected = 0
+    for cluster_idx in range(num_clusters):
+        cluster_points = point_cloud[cluster_labels == cluster_idx]
+        if len(cluster_points) == 0:
+            continue  # Skip empty clusters
+        # Allocate points based on cluster density
+        num_cluster_samples = max(3, int((len(cluster_points) / len(point_cloud)) * num_samples))
+        # Ensure we do not overshoot total point count
+        num_cluster_samples = min(num_samples - total_points_collected, num_cluster_samples)
+        if len(cluster_points) > num_cluster_samples:
+            sampled_cluster = farthest_point_sampling(cluster_points, num_cluster_samples)
+        else:
+            sampled_cluster = cluster_points  # Use all points if fewer than required
+        sampled_points.append(sampled_cluster)
+        total_points_collected += sampled_cluster.shape[0]
+        if total_points_collected >= num_samples:  # Stop early if we reach required count
+            break
+    # Ensure exact `num_samples` points (padding if needed)
+    downsampled_pc = np.vstack(sampled_points)
+    if downsampled_pc.shape[0] < num_samples:
+        # Pad with randomly chosen points to maintain exact shape
+        missing_points = num_samples - downsampled_pc.shape[0]
+        pad_indices = np.random.choice(downsampled_pc.shape[0], missing_points, replace=True)
+        downsampled_pc = np.vstack([downsampled_pc, downsampled_pc[pad_indices]])
+    return downsampled_pc
 
+def process_single_pointcloud_fwf(args):
+    """
+    Computes numerical features for a single point cloud and its corresponding FWF file.
+    
     Args:
-        pointcloud (numpy.ndarray): Input point cloud as an Nx3 array.
-        extra_points_needed (int): Number of additional points to generate.
-
+    args: Tuple (pointcloud_path, fwf_path, index, total_count)
+    
     Returns:
-        numpy.ndarray: Interpolated points as a (extra_points_needed)x3 array.
+    arrmetrics: Computed numerical features as a NumPy array.
     """
-    indices = np.random.choice(len(pointcloud), size=(extra_points_needed, 2))
-    alpha = np.random.rand(extra_points_needed, 1)
-    interpolated_points = alpha * pointcloud[indices[:, 0]] + (1 - alpha) * pointcloud[indices[:, 1]]
-    return interpolated_points
+    pointcloud_path, fwf_path, idx, total_count = args
+    logging.info(f"Processing point cloud {idx+1}/{total_count}")
+
+    # Load point clouds
+    las_points = load_point_cloud(pointcloud_path)
+    fwf_file = load_point_cloud_file(fwf_path)
+
+    # Compute metrics
+    metrics, _ = compute_combined_metrics_fwf(las_points, fwf_file)
+    
+    return np.asarray(metrics)
+
+def process_single_pointcloud(args):
+    """
+    Computes numerical features for a single point cloud and its corresponding FWF file.
+    
+    Args:
+    args: Tuple (pointcloud_path, fwf_path, index, total_count)
+    
+    Returns:
+    arrmetrics: Computed numerical features as a NumPy array.
+    """
+    pointcloud_path, idx, total_count = args
+    logging.info(f"Processing point cloud {idx+1}/{total_count}")
+
+    # Load point clouds
+    las_points = load_point_cloud(pointcloud_path)
+
+    # Compute metrics
+    metrics, _ = compute_combined_metrics(las_points)
+    
+    return np.asarray(metrics)
 
 def generate_metrics_for_selected_pointclouds_fwf(selected_pointclouds, filtered_fwf_pointclouds, metrics_dir, capsel, growsel, prev_elim_features):
     """
-    Generates numerical features for regular and FWF point clouds.
+    Generates numerical features for regular and FWF point clouds in parallel.
 
     Args:
     selected_pointclouds: List of point cloud paths.
@@ -1179,50 +1357,51 @@ def generate_metrics_for_selected_pointclouds_fwf(selected_pointclouds, filtered
     """
     savename = f"training_generated_metrics_{capsel}_{growsel}.csv"
     metrics_path = main_utils.join_paths(metrics_dir, savename)
-    if workspace_setup.get_are_fwf_pcs_extracted(metrics_dir) == False:
-        all_metrics = []
-        for i in range(len(selected_pointclouds)):
-            las_points = load_point_cloud(selected_pointclouds[i])
-            fwf_file = load_point_cloud_file(filtered_fwf_pointclouds[i])
-            metrics, feature_names = compute_combined_metrics_fwf(las_points, fwf_file)
-            arrmetrics = np.asarray(metrics)
-            all_metrics.append(arrmetrics)
-            logging.info("Computed %s/%s metrics!", i+1, len(selected_pointclouds))
-        save_metrics_to_csv_pandas(all_metrics, metrics_path)
+    if not workspace_setup.get_are_fwf_pcs_extracted(metrics_dir):
+        num_workers = mp.cpu_count() // 2  # Use half of CPU cores
+        # Prepare arguments for multiprocessing
+        args_list = [(selected_pointclouds[i], filtered_fwf_pointclouds[i], i, len(selected_pointclouds)) for i in range(len(selected_pointclouds))]
+        # Use multiprocessing pool
+        with mp.Pool(processes=num_workers) as pool:
+            all_metrics = pool.map(process_single_pointcloud_fwf, args_list)
+        # Convert list to NumPy array
         combined_metrics = np.vstack(all_metrics)
+        # Save results
+        save_metrics_to_csv_pandas(all_metrics, metrics_path)
     else:
         logging.info("Previously generated metrics found, importing!")
         combined_metrics = load_metrics_from_path(metrics_path)
-        feature_names = ["height_quantile_25", "height_quantile_50", "height_quantile_75", "dens0", "dens1", "dens2", "dens3", "dens4", "dens5", "dens6", "dens7", "dens8", "dens9", "dec0",
-                     "dec1", "dec2", "dec3", "dec4", "dec5", "dec6", "dec7", "dec8", "max_crown_diameter", "clustering_degree", "intensity_mean", "intensity_std", "intensity_skewness", "intensity_kurtosis", "mean_pulse_widths",
-                     "max_height", "crown_height", "crown_volume", "segdens0",
-                     "segdens1", "segdens2", "segdens3", "segdens4", "segdens5", "segdens6", "segdens7", "tree_height", "highest_branch", "lowest_branch", "longest_spread", "longest_cross_spread",
-                     "equivalent_crown_diameter", "canopy_width_x", "canopy_width_y", "canopy_volume", "point_density", "lai", "canopy_closure", "crown_base_height", "std_dev_height",
-                     "height_kurtosis", "height_skewness", "crown_area", "crown_perimeter", "crown_volume_to_height_ratio", "canopy_cover_fraction", "stem_volume", "canopy_base_height", "fwhm", "echo_width",
-                     "surface_area", "surface_to_volume_ratio", "avg_nn_dist", "fract_dimension", "bb_dims", "crown_shape_indices",
-                     "convex_hull_compactness", "gini_height", "canopy_porosity", "lambda_1_2", "lambda_2_3",
-                     "linearity", "planarity", "sphericity", "branch_angle_variance", "curvature",
-                     "height_variation_coeff", "entropy_height", "leaf_inclination",
-                     "leaf_curvature", "anisotropy", "canopy_skewness", "canopy_kurtosis", "canopy_ellipticity",
-                     "branch_density"]
+    # === Feature Processing ===
+    feature_names = ["height_quantile_25", "height_quantile_50", "height_quantile_75", "dens0", "dens1", "dens2", "dens3", "dens4", "dens5", "dens6", "dens7", "dens8", "dens9", "dec0",
+                    "dec1", "dec2", "dec3", "dec4", "dec5", "dec6", "dec7", "dec8", "max_crown_diameter", "clustering_degree", "intensity_mean", "intensity_std", "intensity_skewness", "intensity_kurtosis", "mean_pulse_widths",
+                    "crown_volume", "segdens0", "segdens1", "segdens2", "segdens3", "segdens4", "segdens5", "segdens6", "segdens7", "highest_branch", "lowest_branch", "longest_spread", "longest_cross_spread",
+                    "equivalent_crown_diameter", "canopy_width_x", "canopy_width_y", "canopy_volume", "point_density", "lai", "canopy_closure", "crown_base_height", "std_dev_height",
+                    "height_kurtosis", "height_skewness", "crown_area", "crown_perimeter", "crown_volume_to_height_ratio", "canopy_cover_fraction", "stem_volume", "canopy_base_height", "fwhm", "echo_width",
+                    "surface_area", "surface_to_volume_ratio", "avg_nn_dist", "fract_dimension", "bb_dims", "crown_shape_indices",
+                    "convex_hull_compactness", "gini_height", "canopy_porosity", "lambda_1_2", "lambda_2_3",
+                    "linearity", "planarity", "sphericity", "branch_angle_variance", "curvature",
+                    "height_variation_coeff", "entropy_height", "leaf_inclination",
+                    "leaf_curvature", "anisotropy", "canopy_skewness", "canopy_kurtosis", "canopy_ellipticity",
+                    "branch_density", "crown_asymmetry", "crown_circularity", "intensity_contrast",
+                    "density_gradient", "crown_compactness", "crown_symmetry", "surface_roughness", "local_dens_variation"]
+    # Convert to DataFrame
     df_metrics = pd.DataFrame(combined_metrics, columns=feature_names)
-    max_crown_height = df_metrics["crown_height"].max()
-    if len(prev_elim_features) > 0:
-        eliminated_features = prev_elim_features
-        df_metrics_reduced = df_metrics.drop(columns=eliminated_features)
+    # === Feature Selection (Remove Highly Correlated Features) ===
+    if prev_elim_features:
+        df_metrics_reduced = df_metrics.drop(columns=prev_elim_features)
         selected_features = df_metrics_reduced.columns.tolist()
         combined_metrics = df_metrics_reduced.to_numpy()
+        highly_correlated_features = prev_elim_features
     else:
         correlation_matrix = df_metrics.corr().abs()
         upper_triangle = correlation_matrix.where(np.triu(np.ones(correlation_matrix.shape), k=1).astype(bool))
         highly_correlated_features = [column for column in upper_triangle.columns if any(upper_triangle[column] > 0.95)]
-        eliminated_features = highly_correlated_features.copy()
         df_metrics_reduced = df_metrics.drop(columns=highly_correlated_features)
         selected_features = df_metrics_reduced.columns.tolist()
+        combined_metrics = df_metrics_reduced.to_numpy()
         logging.info(f"Removed {len(highly_correlated_features)} redundant features due to high correlation.")
         logging.info(f"Remaining features: {len(selected_features)}")
-        combined_metrics = df_metrics_reduced.to_numpy()
-    return combined_metrics, selected_features, eliminated_features, max_crown_height
+    return combined_metrics, selected_features, highly_correlated_features
 
 def load_point_cloud_file(file_path):
     """
@@ -1301,8 +1480,6 @@ def compute_combined_metrics_fwf(points, las_file):
     intensity_skewness = compute_intensity_skewness(intensities) if intensities is not None else 0.0
     intensity_kurtosis = compute_intensity_kurtosis(intensities) if intensities is not None else 0.0
     mean_pulse_widths = compute_mean_pulse_widths(all_waveform_data)
-    max_height = compute_maximum_height(points)
-    crown_height = compute_crown_height(points)
     crown_volume = compute_crown_volume(points)
     segdens0, segdens1, segdens2, segdens3, segdens4, segdens5, segdens6, segdens7 = compute_vertical_segments_distribution(points)
     tree_height = compute_tree_height(points)
@@ -1349,14 +1526,24 @@ def compute_combined_metrics_fwf(points, las_file):
     leaf_inclination = compute_leaf_inclination_angle_distribution(points)
     leaf_curvature = compute_leaf_surface_curvature(points)
     anisotropy = compute_point_cloud_anisotropy(points)
+    crown_asymmetry = compute_crown_asymmetry(points)
+    crown_circularity = compute_crown_circularity(points)
+    intensity_contrast = compute_intensity_contrast(intensities)
+    # new features
+    density_gradient = compute_vertical_density_gradient(points)
+    tc_compactness = compute_tree_crown_compactness(points)
+    crown_symmetry = compute_crown_symmetry(points)
+    surface_roughness = compute_surface_roughness(points)
+    local_dens_variation = compute_local_density_variation(points)
+
     metrics.extend([
         float(height_quantile_25), float(height_quantile_50), float(height_quantile_75),
         float(dens0), float(dens1), float(dens2), float(dens3), float(dens4), float(dens5), float(dens6), float(dens7), float(dens8), float(dens9),
         float(dec0), float(dec1), float(dec2), float(dec3), float(dec4), float(dec5), float(dec6), float(dec7), float(dec8),
         float(max_crown_diameter), float(clustering_degree), float(intensity_mean), float(intensity_std), 
-        float(intensity_skewness), float(intensity_kurtosis), float(mean_pulse_widths), float(max_height),
-        float(crown_height), float(crown_volume), float(segdens0), float(segdens1), float(segdens2), float(segdens3), 
-        float(segdens4), float(segdens5), float(segdens6), float(segdens7), float(tree_height), float(highest_branch), 
+        float(intensity_skewness), float(intensity_kurtosis), float(mean_pulse_widths),
+        float(crown_volume), float(segdens0), float(segdens1), float(segdens2), float(segdens3), 
+        float(segdens4), float(segdens5), float(segdens6), float(segdens7), float(highest_branch), 
         float(lowest_branch), float(longest_spread), float(longest_cross_spread), float(equivalent_crown_diameter),
         float(canopy_width_x), float(canopy_width_y), float(canopy_volume), float(point_density), float(lai),
         float(canopy_closure), float(crown_base_height), float(std_dev_height), float(height_kurtosis),
@@ -1367,12 +1554,13 @@ def compute_combined_metrics_fwf(points, las_file):
         float(linearity), float(planarity), float(sphericity), float(branch_angle_variance), float(curvature),
         float(height_variation_coeff), float(entropy_height), float(leaf_inclination),
         float(leaf_curvature), float(anisotropy), float(canopy_skewness), float(canopy_kurtosis), float(canopy_ellipticity),
-        float(branch_density)
+        float(branch_density), float(crown_asymmetry), float(crown_circularity), float(intensity_contrast),
+        float(density_gradient), float(tc_compactness), float(crown_symmetry), float(surface_roughness), float(local_dens_variation)
     ])
     feature_names = ["height_quantile_25", "height_quantile_50", "height_quantile_75", "dens0", "dens1", "dens2", "dens3", "dens4", "dens5", "dens6", "dens7", "dens8", "dens9", "dec0",
                      "dec1", "dec2", "dec3", "dec4", "dec5", "dec6", "dec7", "dec8", "max_crown_diameter", "clustering_degree", "intensity_mean", "intensity_std", "intensity_skewness", "intensity_kurtosis", "mean_pulse_widths",
-                     "max_height", "crown_height", "crown_volume", "segdens0",
-                     "segdens1", "segdens2", "segdens3", "segdens4", "segdens5", "segdens6", "segdens7", "tree_height", "highest_branch", "lowest_branch", "longest_spread", "longest_cross_spread",
+                     "crown_volume", "segdens0",
+                     "segdens1", "segdens2", "segdens3", "segdens4", "segdens5", "segdens6", "segdens7", "highest_branch", "lowest_branch", "longest_spread", "longest_cross_spread",
                      "equivalent_crown_diameter", "canopy_width_x", "canopy_width_y", "canopy_volume", "point_density", "lai", "canopy_closure", "crown_base_height", "std_dev_height",
                      "height_kurtosis", "height_skewness", "crown_area", "crown_perimeter", "crown_volume_to_height_ratio", "canopy_cover_fraction", "stem_volume", "canopy_base_height", "fwhm", "echo_width",
                      "surface_area", "surface_to_volume_ratio", "avg_nn_dist", "fract_dimension", "bb_dims", "crown_shape_indices",
@@ -1380,7 +1568,8 @@ def compute_combined_metrics_fwf(points, las_file):
                      "linearity", "planarity", "sphericity", "branch_angle_variance", "curvature",
                      "height_variation_coeff", "entropy_height", "leaf_inclination",
                      "leaf_curvature", "anisotropy", "canopy_skewness", "canopy_kurtosis", "canopy_ellipticity",
-                     "branch_density"]
+                     "branch_density", "crown_asymmetry", "crown_circularity", "intensity_contrast",
+                     "density_gradient", "crown_compactness", "crown_symmetry", "surface_roughness", "local_dens_variation"]
     return metrics, feature_names
 
 def match_images_with_pointclouds(selected_pointclouds, selected_images):
@@ -1685,6 +1874,25 @@ def print_class_distribution(y_train, y_val, y_pred, onehot_to_label_dict):
 #---------          As described in my thesis          ----------
 #----------------------------------------------------------------
 
+def compute_crown_asymmetry(points):
+    hull = ConvexHull(points[:, :2])
+    max_diameter = np.max([np.linalg.norm(points[hull.vertices[i]] - points[hull.vertices[j]])
+                           for i in range(len(hull.vertices)) for j in range(i + 1, len(hull.vertices))])
+    hull_center = np.mean(points[hull.vertices], axis=0)
+    distances = np.linalg.norm(points[hull.vertices] - hull_center, axis=1)
+    std_dev_dist = np.std(distances)
+    return std_dev_dist / max_diameter
+
+def compute_crown_circularity(points):
+    hull = ConvexHull(points[:, :2])
+    area = hull.volume
+    bbox = np.ptp(points[:, :2], axis=0)
+    fitted_ellipse_area = np.pi * bbox[0] * bbox[1] / 4
+    return area / fitted_ellipse_area
+
+def compute_intensity_contrast(intensities):
+    return (np.max(intensities) - np.min(intensities)) / (np.max(intensities) + 1e-10)
+
 def compute_first_last_return_intensity_ratio(waveform_data):
     """Computes the ratio of first return intensity to last return intensity."""
     if len(waveform_data) < 2:
@@ -1920,12 +2128,6 @@ def compute_intensity_kurtosis(intensities):
 def compute_mean_pulse_widths(waveform_data):
     return np.mean(waveform_data, axis=0)
 
-def compute_maximum_height(points):
-    return np.max(points[:, 2])
-
-def compute_crown_height(points):
-    return compute_maximum_height(points) - np.min(points[:, 2])
-
 def compute_crown_volume(points):
     hull = ConvexHull(points)
     return hull.volume
@@ -2078,6 +2280,46 @@ def compute_echo_width(waveform_data, threshold=0.1):
     echo_width = max(fwhms) - min(fwhms)
     return echo_width
 
+
+def compute_vertical_density_gradient(points, bins=5):
+    z_values = points[:, 2]
+    min_z, max_z = np.min(z_values), np.max(z_values)
+    heights = np.linspace(min_z, max_z, bins+1)
+    densities = []
+    for i in range(bins):
+        count = np.sum((z_values >= heights[i]) & (z_values < heights[i+1]))
+        densities.append(count)
+    gradient = np.polyfit(range(bins), densities, 1)[0]  # Linear fit slope
+    return gradient
+
+def compute_tree_crown_compactness(points):
+    hull = ConvexHull(points[:, :2])  # Compute 2D convex hull
+    crown_area = hull.volume
+    num_points = len(points)
+    compactness = num_points / crown_area  # Higher = more compact, Lower = more sparse
+    return compactness
+
+def compute_crown_symmetry(points):
+    hull = ConvexHull(points[:, :2])
+    center = np.mean(points[hull.vertices], axis=0)
+    distances = np.linalg.norm(points[hull.vertices] - center, axis=1)
+    left_half = distances[points[hull.vertices][:, 0] < center[0]]
+    right_half = distances[points[hull.vertices][:, 0] > center[0]]
+    return np.std(left_half) / np.std(right_half)  # Ratio of left to right standard deviation
+
+def compute_surface_roughness(points):
+    kdtree = KDTree(points)
+    distances, _ = kdtree.query(points, k=10)
+    return np.std(distances[:, 1])  # Standard deviation of 2nd nearest neighbor distance
+
+def compute_local_density_variation(points, radius=0.5):
+    kdtree = KDTree(points[:, :3])
+    densities = []
+    for point in points:
+        indices = kdtree.query_ball_point(point[:3], radius)
+        densities.append(len(indices))
+    return np.std(densities)  # Standard deviation of local densities
+
 #----------------------------------------------------------------
 #---------             Non-FWF Data prepr              ----------
 #---------          As described in my thesis          ----------
@@ -2190,12 +2432,29 @@ def augment_species_pointclouds(species_pcs, max_representation, species_distrib
             pc_index+=1
             outFile_p = lp.LasData(pc.header)
             outFile_p.vlrs = pc.vlrs
-            angle = pick_random_angle()
-            exported_points_pc = pc_points
-            rotated_pc = rotate_point_cloud(exported_points_pc, angle)
+            new_reg_points = pc_points
+            exported_points_reg = center_pointcloud_o3d(new_reg_points)
+            # === 1. Random Rotation ===
+            angle = pick_random_angle(np.random.randint(1, 360))
+            rotated_pc = rotate_point_cloud(exported_points_reg, angle)
+            # === 2. Random Scaling ===
             scale_factors = np.random.uniform(1 - max_scale, 1 + max_scale, size=3)
             scaled_rotated_pc = scale_point_cloud(rotated_pc, scale_factors)
-            scaled_rotated_pc += np.random.uniform(-0.0005, 0.0005, scaled_rotated_pc.shape)
+            # === 3. Random Flipping ===
+            if np.random.rand() > 0.5:
+                scaled_rotated_pc[:, 0] *= -1  # Flip XZ plane
+            if np.random.rand() > 0.5:
+                scaled_rotated_pc[:, 1] *= -1  # Flip YZ plane
+            # === 4. Gaussian Noise ===
+            noise_std = 0.005  # 5mm standard deviation
+            scaled_rotated_pc += np.random.normal(0, noise_std, scaled_rotated_pc.shape)
+            # === 5. Random Dropout of Points (Simulating Occlusion) ===
+            dropout_prob = np.random.uniform(0.05, 0.15)  # Randomly remove 5-15% of points
+            mask = np.random.rand(scaled_rotated_pc.shape[0]) > dropout_prob
+            scaled_rotated_pc = scaled_rotated_pc[mask]
+            # === 6. Jitter (Final Small Random Noise) ===
+            scaled_rotated_pc += np.random.uniform(-0.045, 0.045, scaled_rotated_pc.shape)
+            # === 7. Random Shuffle Point Order ===
             jittered_shuffled_pc = np.random.permutation(scaled_rotated_pc)
             adjust_las_header(outFile_p, jittered_shuffled_pc)
             outFile_p.x = jittered_shuffled_pc[:, 0]
@@ -2240,10 +2499,11 @@ def get_user_specified_data(pc_path, img_path, cap_sel, grow_sel):
 
 def generate_metrics_for_selected_pointclouds(selected_pointclouds, metrics_dir, capsel, growsel, prev_elim_features):
     """
-    Generates numerical features for point clouds.
+    Generates numerical features for regular and FWF point clouds in parallel.
 
     Args:
     selected_pointclouds: List of point cloud paths.
+    filtered_fwf_pointclouds: List of FWF point cloud paths.
     metrics_dir: Savepath for numerical features.
     capsel: User-specified acquisition method.
     growsel: User-specified leaf-condition.
@@ -2253,47 +2513,49 @@ def generate_metrics_for_selected_pointclouds(selected_pointclouds, metrics_dir,
     """
     savename = f"training_generated_metrics_{capsel}_{growsel}.csv"
     metrics_path = main_utils.join_paths(metrics_dir, savename)
-    if workspace_setup.get_are_fwf_pcs_extracted(metrics_dir) == False:
-        all_metrics = []
-        for i in range(len(selected_pointclouds)):
-            las_points = load_point_cloud(selected_pointclouds[i])
-            metrics, feature_names = compute_combined_metrics(las_points)
-            arrmetrics = np.asarray(metrics)
-            all_metrics.append(arrmetrics)
-            logging.info("Computed %s/%s metrics!", i+1, len(selected_pointclouds))
-        save_metrics_to_csv_pandas(all_metrics, metrics_path)
+    if not workspace_setup.get_are_fwf_pcs_extracted(metrics_dir):
+        num_workers = mp.cpu_count() // 2  # Use half of CPU cores
+        # Prepare arguments for multiprocessing
+        args_list = [(selected_pointclouds[i], i, len(selected_pointclouds)) for i in range(len(selected_pointclouds))]
+        # Use multiprocessing pool
+        with mp.Pool(processes=num_workers) as pool:
+            all_metrics = pool.map(process_single_pointcloud, args_list)
+        # Convert list to NumPy array
         combined_metrics = np.vstack(all_metrics)
+        # Save results
+        save_metrics_to_csv_pandas(all_metrics, metrics_path)
     else:
         logging.info("Previously generated metrics found, importing!")
         combined_metrics = load_metrics_from_path(metrics_path)
-        feature_names = ["height_quantile_25", "height_quantile_50", "height_quantile_75", "dens0", "dens1", "dens2", "dens3", "dens4", "dens5", "dens6", "dens7", "dens8", "dens9", "dec0",
-                     "dec1", "dec2", "dec3", "dec4", "dec5", "dec6", "dec7", "dec8", "max_crown_diameter", "clustering_degree", "max_height", "crown_height", "crown_volume", "segdens0",
-                     "segdens1", "segdens2", "segdens3", "segdens4", "segdens5", "segdens6", "segdens7", "tree_height", "highest_branch", "lowest_branch", "longest_spread", "longest_cross_spread",
+    # === Feature Processing ===
+    feature_names = ["height_quantile_25", "height_quantile_50", "height_quantile_75", "dens0", "dens1", "dens2", "dens3", "dens4", "dens5", "dens6", "dens7", "dens8", "dens9", "dec0",
+                     "dec1", "dec2", "dec3", "dec4", "dec5", "dec6", "dec7", "dec8", "max_crown_diameter", "clustering_degree", "crown_volume", "segdens0",
+                     "segdens1", "segdens2", "segdens3", "segdens4", "segdens5", "segdens6", "segdens7", "highest_branch", "lowest_branch", "longest_spread", "longest_cross_spread",
                      "equivalent_crown_diameter", "canopy_width_x", "canopy_width_y", "canopy_volume", "point_density", "lai", "canopy_closure", "crown_base_height", "std_dev_height",
                      "height_kurtosis", "height_skewness", "crown_area", "crown_perimeter", "crown_volume_to_height_ratio", "canopy_cover_fraction", "stem_volume", "canopy_base_height",
                      "surface_area", "surface_to_volume_ratio", "avg_nn_dist", "fract_dimension", "bb_dims", "crown_shape_indices",
                      "convex_hull_compactness", "gini_height", "canopy_porosity", "lambda_1_2", "lambda_2_3",
                      "linearity", "planarity", "sphericity", "branch_angle_variance", "curvature",
                      "height_variation_coeff", "entropy_height", "leaf_inclination",
-                     "leaf_curvature", "anisotropy", "canopy_skewness", "canopy_kurtosis", "canopy_ellipticity", "branch_density"]
+                     "leaf_curvature", "anisotropy", "canopy_skewness", "canopy_kurtosis", "canopy_ellipticity", "branch_density", "crown_asymmetry", "crown_circularity",
+                     "density_gradient", "crown_compactness", "crown_symmetry", "surface_roughness", "local_dens_variation"]
+    # Convert to DataFrame
     df_metrics = pd.DataFrame(combined_metrics, columns=feature_names)
-    max_crown_height = df_metrics["crown_height"].max()
-    if len(prev_elim_features) > 0:
-        eliminated_features = prev_elim_features
-        df_metrics_reduced = df_metrics.drop(columns=eliminated_features)
+    # === Feature Selection (Remove Highly Correlated Features) ===
+    if prev_elim_features:
+        df_metrics_reduced = df_metrics.drop(columns=prev_elim_features)
         selected_features = df_metrics_reduced.columns.tolist()
         combined_metrics = df_metrics_reduced.to_numpy()
     else:
         correlation_matrix = df_metrics.corr().abs()
         upper_triangle = correlation_matrix.where(np.triu(np.ones(correlation_matrix.shape), k=1).astype(bool))
-        highly_correlated_features = [column for column in upper_triangle.columns if any(upper_triangle[column] > 0.9)]
+        highly_correlated_features = [column for column in upper_triangle.columns if any(upper_triangle[column] > 0.95)]
         df_metrics_reduced = df_metrics.drop(columns=highly_correlated_features)
         selected_features = df_metrics_reduced.columns.tolist()
+        combined_metrics = df_metrics_reduced.to_numpy()
         logging.info(f"Removed {len(highly_correlated_features)} redundant features due to high correlation.")
         logging.info(f"Remaining features: {len(selected_features)}")
-        combined_metrics = df_metrics_reduced.to_numpy()
-        eliminated_features = highly_correlated_features.copy()
-    return combined_metrics, selected_features, eliminated_features, max_crown_height
+    return combined_metrics, selected_features, highly_correlated_features
 
 def compute_combined_metrics(points):
     """
@@ -2314,8 +2576,6 @@ def compute_combined_metrics(points):
     dec0, dec1, dec2, dec3, dec4, dec5, dec6, dec7, dec8 = compute_height_density_deciles(points)
     max_crown_diameter = compute_maximum_crown_diameter(points)
     clustering_degree = compute_points_relative_clustering_degree(points)
-    max_height = compute_maximum_height(points)
-    crown_height = compute_crown_height(points)
     crown_volume = compute_crown_volume(points)
     segdens0, segdens1, segdens2, segdens3, segdens4, segdens5, segdens6, segdens7 = compute_vertical_segments_distribution(points)
     tree_height = compute_tree_height(points)
@@ -2360,13 +2620,22 @@ def compute_combined_metrics(points):
     leaf_inclination = compute_leaf_inclination_angle_distribution(points)
     leaf_curvature = compute_leaf_surface_curvature(points)
     anisotropy = compute_point_cloud_anisotropy(points)
+    crown_asymmetry = compute_crown_asymmetry(points)
+    crown_circularity = compute_crown_circularity(points)
+    # new features
+    density_gradient = compute_vertical_density_gradient(points)
+    tc_compactness = compute_tree_crown_compactness(points)
+    crown_symmetry = compute_crown_symmetry(points)
+    surface_roughness = compute_surface_roughness(points)
+    local_dens_variation = compute_local_density_variation(points)
+
     metrics.extend([
         float(height_quantile_25), float(height_quantile_50), float(height_quantile_75),
         float(dens0), float(dens1), float(dens2), float(dens3), float(dens4), float(dens5), float(dens6), float(dens7), float(dens8), float(dens9),
         float(dec0), float(dec1), float(dec2), float(dec3), float(dec4), float(dec5), float(dec6), float(dec7), float(dec8),
-        float(max_crown_diameter), float(clustering_degree), float(max_height),
-        float(crown_height), float(crown_volume), float(segdens0), float(segdens1), float(segdens2), float(segdens3), 
-        float(segdens4), float(segdens5), float(segdens6), float(segdens7), float(tree_height), float(highest_branch), 
+        float(max_crown_diameter), float(clustering_degree),
+        float(crown_volume), float(segdens0), float(segdens1), float(segdens2), float(segdens3), 
+        float(segdens4), float(segdens5), float(segdens6), float(segdens7), float(highest_branch), 
         float(lowest_branch), float(longest_spread), float(longest_cross_spread), float(equivalent_crown_diameter),
         float(canopy_width_x), float(canopy_width_y), float(canopy_volume), float(point_density), float(lai),
         float(canopy_closure), float(crown_base_height), float(std_dev_height), float(height_kurtosis),
@@ -2377,17 +2646,19 @@ def compute_combined_metrics(points):
         float(linearity), float(planarity), float(sphericity), float(branch_angle_variance), float(curvature),
         float(height_variation_coeff), float(entropy_height), float(leaf_inclination),
         float(leaf_curvature), float(anisotropy), float(canopy_skewness), float(canopy_kurtosis), float(canopy_ellipticity),
-        float(branch_density)
+        float(branch_density), float(crown_asymmetry), float(crown_circularity),
+        float(density_gradient), float(tc_compactness), float(crown_symmetry), float(surface_roughness), float(local_dens_variation)
     ])
     feature_names = ["height_quantile_25", "height_quantile_50", "height_quantile_75", "dens0", "dens1", "dens2", "dens3", "dens4", "dens5", "dens6", "dens7", "dens8", "dens9", "dec0",
-                     "dec1", "dec2", "dec3", "dec4", "dec5", "dec6", "dec7", "dec8", "max_crown_diameter", "clustering_degree", "max_height", "crown_height", "crown_volume", "segdens0",
-                     "segdens1", "segdens2", "segdens3", "segdens4", "segdens5", "segdens6", "segdens7", "tree_height", "highest_branch", "lowest_branch", "longest_spread", "longest_cross_spread",
+                     "dec1", "dec2", "dec3", "dec4", "dec5", "dec6", "dec7", "dec8", "max_crown_diameter", "clustering_degree", "crown_volume", "segdens0",
+                     "segdens1", "segdens2", "segdens3", "segdens4", "segdens5", "segdens6", "segdens7", "highest_branch", "lowest_branch", "longest_spread", "longest_cross_spread",
                      "equivalent_crown_diameter", "canopy_width_x", "canopy_width_y", "canopy_volume", "point_density", "lai", "canopy_closure", "crown_base_height", "std_dev_height",
                      "height_kurtosis", "height_skewness", "crown_area", "crown_perimeter", "crown_volume_to_height_ratio", "canopy_cover_fraction", "stem_volume", "canopy_base_height",
                      "surface_area", "surface_to_volume_ratio", "avg_nn_dist", "fract_dimension", "bb_dims", "crown_shape_indices",
                      "convex_hull_compactness", "gini_height", "canopy_porosity", "lambda_1_2", "lambda_2_3",
                      "linearity", "planarity", "sphericity", "branch_angle_variance", "curvature",
                      "height_variation_coeff", "entropy_height", "leaf_inclination",
-                     "leaf_curvature", "anisotropy", "canopy_skewness", "canopy_kurtosis", "canopy_ellipticity", "branch_density"]
+                     "leaf_curvature", "anisotropy", "canopy_skewness", "canopy_kurtosis", "canopy_ellipticity", "branch_density", "crown_asymmetry", "crown_circularity",
+                     "density_gradient", "crown_compactness", "crown_symmetry", "surface_roughness", "local_dens_variation"]
 
     return metrics, feature_names

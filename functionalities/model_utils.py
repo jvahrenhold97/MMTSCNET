@@ -1,8 +1,8 @@
 import tensorflow as tf
-from keras.layers import Input, Conv1D, GlobalAveragePooling1D, GlobalMaxPooling1D, Dense, Dropout, Concatenate, Reshape, ReLU, Add, Activation, LayerNormalization, Attention
+from keras.layers import Input, Conv1D, GlobalAveragePooling1D, GlobalMaxPooling1D, Dense, Dropout, Concatenate, Reshape, ReLU, Add, Activation, LayerNormalization, Attention, Conv2D, DepthwiseConv2D, GlobalAveragePooling2D, Multiply, Lambda
 from keras.models import Model
 from keras.regularizers import L1L2
-from keras.applications import DenseNet201, DenseNet121
+from keras.applications import DenseNet121, EfficientNetV2S
 from keras.callbacks import Callback
 from sklearn.metrics import f1_score, confusion_matrix, precision_score, recall_score
 from keras.optimizers import Adam
@@ -237,12 +237,12 @@ def scheduler(epoch, lr):
     lr: Current learning rate.
 
     Returns:
-    lr: Lraning rate to be applied during the next epoch.
+    lr: Learning rate to be applied during the next epoch.
     """
-    if epoch % 10 == 0:  # Every 10 epochs, increase LR
-        return min(lr * 1.1, 1e-4)  # Limit max LR
-    if lr >= 5e-7:
-        return lr*0.97
+    if epoch <= 5:
+        return lr * (1.1 if lr < 1e-4 else 1.002)
+    elif epoch > 5 and lr >= 1e-7:
+        return lr * 0.98
     else:
         return lr
         
@@ -374,10 +374,9 @@ def load_tuned_model_from_folder(model_path):
     """
     custom_objects = {
         'HyperParameters': HyperParameters,
-        'TNetLess': OrthogonalTNet,
         'PointCloudExtractor': PointCloudExtractor,
         'EnhancedMetricsModel': EnhancedMetricsModel,
-        'DenseNetModel': DenseNetModel,
+        'CNNModel': EfficientNetModel,
         'CombinedModel': CombinedModel
     }
     model = keras.models.load_model(model_path, custom_objects)
@@ -805,17 +804,19 @@ class PointCloudExtractor(tf.keras.layers.Layer):
 
     def build(self, input_shape):
         # === Hyperparameter Configuration ===
-        num_conv1d = self.hp.Choice('pce_depth', [2, 3, 4])
-        hp_units = self.hp.Choice('pce_units', values=[192, 256, 512])
-        hp_dropout_rate = self.hp.Float('pce_dropout_rate', min_value=0.2, max_value=0.3, step=0.025)
-        hp_regularizer = self.hp.Float('pce_regularization', min_value=0.00001, max_value=0.002, step=0.00001)
-        hp_neighbors = self.hp.Int('pce_neighbors', min_value=8, max_value=64, step=8)
+        num_conv1d = self.hp.Choice('pce_depth', [2, 3])
+        hp_units = self.hp.Choice('pce_units', [128, 256])
+        hp_dropout_rate = self.hp.Float('pce_dropout_rate', min_value=0.05, max_value=0.2, step=0.025)
+        hp_regularizer = self.hp.Float('pce_regularization', min_value=0.00001, max_value=0.0001, step=0.00001)
+        hp_neighbors = self.hp.Int('pce_neighbors', min_value=8, max_value=32, step=8)
 
         # === Multi-Scale Grouping Radii ===
         self.radii = [
-            self.hp.Float('pce_msg_radius_1', min_value=0.01, max_value=0.2, step=0.005),
-            self.hp.Float('pce_msg_radius_2', min_value=0.2, max_value=0.4, step=0.005),
-            self.hp.Float('pce_msg_radius_3', min_value=0.4, max_value=1.0, step=0.01)
+            self.hp.Float('pce_msg_radius_1', min_value=0.005, max_value=0.2, step=0.005),
+            self.hp.Float('pce_msg_radius_2', min_value=0.05, max_value=0.4, step=0.005),
+            self.hp.Float('pce_msg_radius_3', min_value=0.1, max_value=0.75, step=0.005),
+            self.hp.Float('pce_msg_radius_4', min_value=0.3, max_value=0.95, step=0.005),
+            self.hp.Float('pce_msg_radius_5', min_value=0.6, max_value=1.1, step=0.005)
         ]
         self.msg_neighbors = hp_neighbors
 
@@ -829,7 +830,7 @@ class PointCloudExtractor(tf.keras.layers.Layer):
         for i in range(num_conv1d):
             filters = max(32, (hp_units // (i + 1)))
             filters = filters - (filters % 16)
-            conv = Conv1D(filters, 1, padding='same', kernel_regularizer=L1L2(l1=hp_regularizer, l2=hp_regularizer), name=f"pce_conv_b_{i}")
+            conv = Conv1D(filters, 1, padding='same', kernel_regularizer=L1L2(l1=hp_regularizer*(i + 0.5), l2=hp_regularizer*(i + 1)), name=f"pce_conv_b_{i}")
             norm = GroupNormalization(groups=16, name=f"pce_lnorm_b_{i}")
             act = Activation('swish', name=f"pce_swish_b_{i}")
             dropout = Dropout(hp_dropout_rate, name=f"pce_dropout_b_{i}")
@@ -839,13 +840,11 @@ class PointCloudExtractor(tf.keras.layers.Layer):
         self.global_pool = HybridPooling(name="pce_hybpool_01")
         self.global_norm = GroupNormalization(groups=16, name="pce_lnorm_01")
 
-        self.transform = OrthogonalTNet(3, self.hp)
         self.global_feature_mix = Dense(hp_units, activation='swish', name="pce_feature_mix")
 
     def call(self, inputs):
         batch_size = tf.shape(inputs)[0]
-        transform = self.transform(inputs)
-        point_cloud_transformed = tf.matmul(inputs, transform)
+        point_cloud_transformed = inputs
 
         # === Compute Pairwise Distances for Ball Query ===
         distances = tf.norm(
@@ -865,13 +864,17 @@ class PointCloudExtractor(tf.keras.layers.Layer):
         # === Feature Aggregation with Learnable Mixing ===
         features = tf.concat(grouped_features, axis=-1)
         features = self.global_feature_mix(features)
+
+        # === Residual Connection ===
+        residual = self.residual_conv(features)
+
+        # === Convolution Block ===
         features = self.conv1(features)
         features = self.norm1(features)
         features = self.act1(features)
         features = self.dropout1(features)
 
         # === Residual Connection ===
-        residual = self.residual_conv(features)
         residual = tf.reshape(residual, tf.shape(features))
         features = tf.add(features, residual)
 
@@ -888,84 +891,36 @@ class PointCloudExtractor(tf.keras.layers.Layer):
         features = tf.reshape(features, (batch_size, num_points, new_features_dim))
 
         return self.global_pool(features)
-
-
-class OrthogonalTNet(tf.keras.layers.Layer):
-    """
-    Optimized T-Net with Orthogonality Regularization for Stability.
-    """
-    def __init__(self, transform_size, hp, **kwargs):
-        super(OrthogonalTNet, self).__init__(**kwargs)
-        self.transform_size = transform_size
-        self.hp = hp
-
-    def build(self, input_shape):
-        hp_units = self.hp.Choice('tnet_units', values=[32, 64, 128])
-        hp_reg = self.hp.Float('tnet_regularization', min_value=0.000001, max_value=0.002, step=0.000001)
-        hp_dropout = self.hp.Float('tnet_dropout', min_value=0.25, max_value=0.4, step=0.025)
-
-        # === Feature Extraction ===
-        self.conv1 = Conv1D(hp_units, 1, kernel_regularizer=L1L2(l1=hp_reg, l2=hp_reg), name="t_net_conv_01")
-        self.norm1 = GroupNormalization(groups=8, name="t_net_gnorm_01")
-        self.act1 = Activation('swish', name="t_net_swish_01")
-        self.dropout1 = Dropout(hp_dropout*0.75, name="t_net_dropout_01")
-
-        self.global_pool = GlobalMaxPooling1D(name="t_net_gmpool_01")
-
-        # === Dense Layers ===
-        self.dense1 = Dense(hp_units, kernel_regularizer=L1L2(l1=hp_reg, l2=hp_reg), name="t_net_dense_01")
-        self.norm2 = LayerNormalization(name="t_net_lnorm_01")
-        self.act2 = Activation('swish', name="t_net_swish_02")
-        self.dropout2 = Dropout(hp_dropout, name="t_net_dropout_02")
-
-        self.dense2 = Dense(self.transform_size**2, activation='linear', bias_initializer='zeros', name="t_net_dense_02")
-        self.reshape = tf.keras.layers.Reshape((self.transform_size, self.transform_size))
-
-    def call(self, inputs):
-        x = self.conv1(inputs)
-        x = self.norm1(x)
-        x = self.act1(x)
-        x = self.dropout1(x)
-
-        x = self.global_pool(x)
-
-        x = self.dense1(x)
-        x = self.norm2(x)
-        x = self.act2(x)
-        x = self.dropout2(x)
-
-        x = self.dense2(x)
-        x = self.reshape(x)
-
-        identity = tf.eye(self.transform_size, batch_shape=[tf.shape(x)[0]], dtype=x.dtype)
-        ortho_loss = tf.norm(tf.matmul(x, tf.transpose(x, [0, 2, 1])) - identity, ord='fro', axis=[-2, -1])
-        self.add_loss(0.01 * tf.reduce_mean(ortho_loss))
-
-        return x
-
-class DenseNetModel(tf.keras.layers.Layer):
+    
+class EfficientNetModel(tf.keras.layers.Layer):
     """
     MMTSCNet Image Processor with Partial Fine-Tuning.
     """
-    def __init__(self, img_input_shape, fine_tune_at=180, **kwargs):
-        super(DenseNetModel, self).__init__(**kwargs)
+    def __init__(self, img_input_shape, **kwargs):
+        super(EfficientNetModel, self).__init__(**kwargs)
         self.img_input_shape = img_input_shape
-        self.fine_tune_at = fine_tune_at
 
     def build(self, input_shape):
-        base_model = DenseNet121(include_top=False, input_shape=self.img_input_shape, pooling='avg')
-        for layer in base_model.layers[:self.fine_tune_at]:
+        base_model = EfficientNetV2S(include_top=False, input_shape=self.img_input_shape, pooling='avg')
+        # Step 1: Freeze Entire DenseNet
+        for layer in base_model.layers:
             layer.trainable = False
-        for layer in base_model.layers[self.fine_tune_at:]:
+        # Step 2: Unfreeze Last 50 Layers
+        for layer in base_model.layers[-20:]:
             layer.trainable = True
-        self.model = base_model
+        self.base_model = base_model
 
+        self.layer_norm = LayerNormalization()
+        self.dropout = Dropout(0.2)
+    
     def call(self, inputs):
-        return self.model(inputs)
+        x = self.base_model(inputs)  # Extract Features
+        x = self.layer_norm(x)  # Use LayerNormalization
+        return self.dropout(x)
 
     def get_config(self):
-        config = super(DenseNetModel, self).get_config()
-        config.update({'img_input_shape': self.img_input_shape, 'fine_tune_at': self.fine_tune_at})
+        config = super(EfficientNetModel, self).get_config()
+        config.update({'img_input_shape': self.img_input_shape})
         return config
 
     @classmethod
@@ -987,26 +942,26 @@ class EnhancedMetricsModel(tf.keras.layers.Layer):
     def build(self, input_shape):
         # Hyperparameter Configuration
         units = self.hp.Choice('metrics_units', values=[128, 256, 512])
-        dropout_rate = self.hp.Float('metrics_dropout_rate', min_value=0.2, max_value=0.4, step=0.025)
+        dropout_rate = self.hp.Float('metrics_dropout_rate', min_value=0.2, max_value=0.35, step=0.025)
         regularization = self.hp.Float('metrics_regularization', min_value=0.00001, max_value=0.002, step=0.00001)
 
         # === Define Layers in build() ===
-        self.dense1 = Dense(units, activation=None, kernel_regularizer=L1L2(l1=regularization/8, l2=regularization/8), name="metrics_dense_1")
+        self.dense1 = Dense(units, activation=None, kernel_regularizer=L1L2(l1=regularization/16, l2=regularization/8), name="metrics_dense_1")
         self.norm1 = LayerNormalization(name="metrics_norm_1")
         self.act1 = Activation('swish', name="metrics_swish_1")
         self.dropout1 = Dropout(dropout_rate, name="metrics_dropout_1")
 
-        self.dense2 = Dense(units // 2, activation=None, kernel_regularizer=L1L2(l1=regularization/4, l2=regularization/4), name="metrics_dense_2")
+        self.dense2 = Dense(units // 2, activation=None, kernel_regularizer=L1L2(l1=regularization/8, l2=regularization/4), name="metrics_dense_2")
         self.norm2 = LayerNormalization(name="metrics_norm_2")
         self.act2 = Activation('swish', name="metrics_swish_2")
         self.dropout2 = Dropout(dropout_rate/2, name="metrics_dropout_2")
 
-        self.dense3 = Dense(units // 4, activation=None, kernel_regularizer=L1L2(l1=regularization/2, l2=regularization/2), name="metrics_dense_3")
+        self.dense3 = Dense(units // 4, activation=None, kernel_regularizer=L1L2(l1=regularization/4, l2=regularization/2), name="metrics_dense_3")
         self.norm3 = LayerNormalization(name="metrics_norm_3")
         self.act3 = Activation('swish', name="metrics_swish_3")
         self.dropout3 = Dropout(dropout_rate/4, name="metrics_dropout_3")
 
-        self.dense4 = Dense(units // 8, activation=None, kernel_regularizer=L1L2(l1=regularization, l2=regularization), name="metrics_dense_4")
+        self.dense4 = Dense(units // 8, activation=None, kernel_regularizer=L1L2(l1=regularization/2, l2=regularization), name="metrics_dense_4")
         self.norm4 = LayerNormalization(name="metrics_norm_4")
         self.act4 = Activation('swish', name="metrics_swish_4")
         self.dropout4 = Dropout(dropout_rate/8, name="metrics_dropout_4")
@@ -1092,7 +1047,7 @@ def residual_dense_block(x, units, dropout_rate, regularizer_value, name_prefix)
     adaptive_dropout = dropout_rate * (1 + (units / 256))  
     adaptive_regularization = regularizer_value * (1 + (units / 512))
     shortcut = x  
-    x = Dense(units, activation=None, kernel_regularizer=L1L2(l1=adaptive_regularization, l2=adaptive_regularization), name=f"{name_prefix}_dense")(x)
+    x = Dense(units, activation=None, kernel_regularizer=L1L2(l1=adaptive_regularization/1.5, l2=adaptive_regularization), name=f"{name_prefix}_dense")(x)
     x = GroupNormalization(groups=num_groups, name=f"{name_prefix}_gnorm")(x)
     x = Activation('swish', name=f"{name_prefix}_swish")(x)
     x = Dropout(adaptive_dropout, name=f"{name_prefix}_dropout")(x)
@@ -1100,6 +1055,26 @@ def residual_dense_block(x, units, dropout_rate, regularizer_value, name_prefix)
     if input_dim != units:
         shortcut = Dense(units, activation=None, name=f"{name_prefix}_shortcut_projection")(shortcut)  
     return Add(name=f"{name_prefix}_residual_add")([x, shortcut])
+
+def focal_loss(alpha=0.25, gamma=2.0):
+    """
+    Focal loss function for handling class imbalance.
+
+    Args:
+    alpha: Scaling factor for rare classes (0.25 default for more weight on rare classes).
+    gamma: Focusing parameter (2.0 default for more focus on misclassified examples).
+
+    Returns:
+    A loss function that can be used in model.compile().
+    """
+    def loss(y_true, y_pred):
+        epsilon = tf.keras.backend.epsilon()
+        y_pred = tf.clip_by_value(y_pred, epsilon, 1. - epsilon)  # Avoid log(0)
+        cross_entropy = -y_true * tf.math.log(y_pred)
+        weight = alpha * tf.pow(1 - y_pred, gamma)  # Reduce easy samples' impact
+        return tf.reduce_sum(weight * cross_entropy, axis=-1)
+
+    return loss
 
 class CombinedModel(HyperModel):
     """
@@ -1126,24 +1101,33 @@ class CombinedModel(HyperModel):
 
         # === Branches ===
         pointnet_branch = PointCloudExtractor(self.num_points, hp)(pointnet_input)
-        image_branch_1 = DenseNetModel(self.image_shape)(image_input_1)
-        image_branch_2 = DenseNetModel(self.image_shape)(image_input_2)
+        image_branch_1 = EfficientNetModel(self.image_shape)(image_input_1)
+        image_branch_2 = EfficientNetModel(self.image_shape)(image_input_2)
         metrics_branch = EnhancedMetricsModel(hp)(metrics_input)
 
         # === Hyperparameter Setup ===
         projection_units = hp.Choice('projection_units', [64, 128, 192])
-        num_dense = hp.Choice('clss_depth', [3, 4, 5])  
+        num_dense = hp.Choice('clss_depth', [2, 3])  
         units_dense = hp.Choice('clss_units', [128, 256, 512])
-        dropout_clss = hp.Float('clss_dropout_rate', min_value=0.25, max_value=0.4, step=0.025)
+        dropout_clss = hp.Float('clss_dropout_rate', min_value=0.2, max_value=0.35, step=0.025)
         regularizer_value_clss = hp.Float('clss_regularization', min_value=0.00001, max_value=0.002, step=0.00001)
 
         # Compute attention-based feature weights
         fusion_features = Concatenate()([pointnet_branch, image_branch_1, image_branch_2, metrics_branch])
-        attention_scores = Dense(128, activation="swish", kernel_regularizer=L1L2(l1=regularizer_value_clss, l2=regularizer_value_clss))(fusion_features)
+        attention_scores = Dense(128, activation="swish", kernel_regularizer=L1L2(l1=regularizer_value_clss/1.5, l2=regularizer_value_clss))(fusion_features)
 
-        # Sigmoid-based independent scaling (instead of softmax)
-        attention_weights = Dense(4, activation="sigmoid")(attention_scores)  
+        # Competitive Attention: Use softmax instead of independent sigmoid scaling
+        context_vector = Dense(4, activation=None)(Concatenate()([attention_scores, fusion_features]))
+        attention_weights = Activation("softmax", name="attention_weights")(context_vector)  # Apply softmax
+
+        # Split into modality-specific attention scores
         pointnet_weight, image1_weight, image2_weight, metrics_weight = tf.split(attention_weights, 4, axis=-1)
+
+        # === Apply Balanced Weights to Feature Extractors ===
+        pointnet_branch = Multiply()([pointnet_branch, pointnet_weight])
+        image_branch_1 = Multiply()([image_branch_1, image1_weight])
+        image_branch_2 = Multiply()([image_branch_2, image2_weight])
+        metrics_branch = Multiply()([metrics_branch, metrics_weight])
 
         # Apply learned weights to extracted features (not layer size!)
         pointnet_branch = pointnet_branch * (pointnet_weight + 1)
@@ -1168,9 +1152,9 @@ class CombinedModel(HyperModel):
 
         model = Model(inputs=[pointnet_input, image_input_1, image_input_2, metrics_input], outputs=output)
         # Learning rate setup
-        initial_learning_rate = hp.Choice('learning_rate', [5e-5, 2.5e-5, 1e-5, 7.5e-6, 5e-6, 2.5e-6, 1e-6, 7.5e-7, 5e-7])
-        model.compile(optimizer=Adam(learning_rate=initial_learning_rate, clipnorm=1.0),
-                      loss=CategoricalCrossentropy(label_smoothing=0.05),
+        initial_learning_rate = hp.Choice('learning_rate', [1e-4, 7.5e-5, 5e-5, 2.5e-5, 1e-5])
+        model.compile(optimizer=Adam(learning_rate=initial_learning_rate, clipnorm=0.5),
+                      loss=focal_loss(alpha=0.25, gamma=2.0),
                       metrics=['accuracy', tf.keras.metrics.Precision(name="precision"), tf.keras.metrics.Recall(name="recall"), tf.keras.metrics.AUC(name="pr_curve", curve="PR"), tf.keras.metrics.PrecisionAtRecall(0.85, name="pr_at_rec"), tf.keras.metrics.RecallAtPrecision(0.85, name="rec_at_pr")])
         
         trainable_params = np.sum([K.count_params(w) for w in model.trainable_weights])
@@ -1200,63 +1184,3 @@ class CombinedModel(HyperModel):
     @classmethod
     def from_config(cls, config):
         return cls(**config)
-    
-class MacroF1ScoreCallback(Callback):
-    """
-    Macro F1-Score Callback. (Calculates F1-Score for each epoch)
-
-    """
-    def __init__(self, validation_data, batch_size):
-        super().__init__()
-        self.validation_data = validation_data
-        self.batch_size = batch_size
-
-    def on_epoch_end(self, epoch, logs=None):
-        val_gen = self.validation_data
-        y_true = []
-        y_pred = []
-        # Calculation of F1-Score from epoch predictions
-        for i in range(len(val_gen)):
-            X_val, y_val = val_gen[i]
-            y_true.extend(np.argmax(y_val, axis=1))
-            y_pred.extend(np.argmax(self.model.predict(X_val, batch_size=self.batch_size, verbose=0), axis=1))
-        
-        y_true = np.array(y_true)
-        y_pred = np.array(y_pred)
-        
-        macro_f1 = f1_score(y_true, y_pred, average='macro')
-        # Logging of the Macro F1-Score
-        logs['val_macro_f1'] = macro_f1
-        print(f" — val_macro_f1: {macro_f1:.4f}")
-
-class WeightedResultsCallback(Callback):
-    """
-    Custom weighted Callback.
-
-    """
-    def __init__(self, validation_data, batch_size):
-        super().__init__()
-        self.validation_data = validation_data
-        self.batch_size = batch_size
-
-    def on_epoch_end(self, epoch, logs=None):
-        val_data = self.validation_data
-        true_labels = []
-        pred_labels = []
-        # Prediction on a per batch absis
-        for batch in val_data:
-            X_batch, y_batch = batch
-            preds = self.model.predict(X_batch, batch_size=self.batch_size, verbose=0)
-            true_labels.extend(np.argmax(y_batch, axis=1))
-            pred_labels.extend(np.argmax(preds, axis=1))
-        # creation of epoch predictions
-        true_labels = np.array(true_labels)
-        pred_labels = np.array(pred_labels)
-        # Calculation of metrics to apply weights to
-        precision = precision_score(true_labels, pred_labels, average='macro')
-        recall = recall_score(true_labels, pred_labels, average='macro')
-        # Calculation of custom metric
-        custom_metric = (0.2 * precision + 0.8 * recall)
-        # Logging of Custom metric
-        logs['val_custom_metric'] = custom_metric
-        print(f"val_custom_score: {custom_metric:.4f}")
