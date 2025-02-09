@@ -33,7 +33,7 @@ def parse_arguments():
                         type=str, required=True)
     parser.add_argument('--elimper',
                         help='Threshold percentage which defines which tree species should not be included based on their representation percentage. Range: [0 - 99]',
-                        type=float, default=3.0)
+                        type=float, default=5.0)
     parser.add_argument('--maxpcscale',
                         help='Maximum scaling to apply when augmenting pointclouds. Range: [0.001 - 0.15]',
                         type=float, default=0.20)

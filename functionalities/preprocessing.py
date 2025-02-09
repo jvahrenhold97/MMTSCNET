@@ -234,9 +234,6 @@ def eliminate_unused_species_fwf(reg_pc_folder, fwf_pc_folder, elimination_perce
     fwf_pointclouds = select_pointclouds(fwf_pc_folder)
     species_list = get_species_distribution_fwf(pointclouds, fwf_pointclouds)
     species_to_use, species_distribution = eliminate_underrepresented_species(species_list, elimination_percentage)
-    species_to_use = ["CarBet", "FagSyl", "PicAbi", "PinSyl", "PseMen", "QuePet", "QueRub"]
-    #species_to_use = ["CarBet", "FagSyl", "PicAbi", "PseMen", "QuePet"]
-    #species_to_use = ["FagSyl", "PicAbi", "PseMen", "QuePet"]
     logging.info("Species to use: %s", species_to_use)
     pointclouds_dict = defaultdict(lambda: {"REG": None, "FWF": None})
     def extract_species(filename):
@@ -2456,6 +2453,7 @@ def augment_species_pointclouds(species_pcs, max_representation, species_distrib
             scaled_rotated_pc += np.random.uniform(-0.045, 0.045, scaled_rotated_pc.shape)
             # === 7. Random Shuffle Point Order ===
             jittered_shuffled_pc = np.random.permutation(scaled_rotated_pc)
+            outFile_p.points = outFile_p.points[:jittered_shuffled_pc.shape[0]]
             adjust_las_header(outFile_p, jittered_shuffled_pc)
             outFile_p.x = jittered_shuffled_pc[:, 0]
             outFile_p.y = jittered_shuffled_pc[:, 1]
@@ -2546,6 +2544,7 @@ def generate_metrics_for_selected_pointclouds(selected_pointclouds, metrics_dir,
         df_metrics_reduced = df_metrics.drop(columns=prev_elim_features)
         selected_features = df_metrics_reduced.columns.tolist()
         combined_metrics = df_metrics_reduced.to_numpy()
+        highly_correlated_features = prev_elim_features
     else:
         correlation_matrix = df_metrics.corr().abs()
         upper_triangle = correlation_matrix.where(np.triu(np.ones(correlation_matrix.shape), k=1).astype(bool))
