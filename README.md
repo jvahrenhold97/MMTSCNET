@@ -169,7 +169,7 @@ This command is OPTIONAL and defines the minimum representation below which spec
 <br>
 
 ```bash
---maxpcscale 0.2        [0.001 to 0.200]
+--maxpcscale 0.2        [0.001 to 0.300]
 ```
 This command is OPTIONAL and defines the scaling applied to point clouds during data augmentation.<br>
 <br>
@@ -181,13 +181,13 @@ This command is OPTIONAL and defines the split ratio for training and testing da
 <br>
 
 ```bash
---capsel "ULS"        [ALS | TLS | ULS | ALL]
+--capsel "ULS"        [ALS | TLS | ULS]
 ```
 This command is OPTIONAL and defines the capture methods to be included in the model training process.<br>
 <br>
 
 ```bash
---growsel "LEAF-ON"        [LEAF-ON | LEAF-OFF | ALL]
+--growsel "LEAF-ON"        [LEAF-ON | LEAF-OFF]
 ```
 This command is OPTIONAL and defines the tree growth state to be included in the model training process.<br>
 <br>
@@ -213,7 +213,7 @@ This command is OPTIONAL and enables debug logging if used.<br>
 ```bash
 --inference
 ```
-This command is OPTIONAL and enables predicting for custom data if MMTSCNet has been tuned before.<br>
+This command is OPTIONAL and enables predicting for custom data if MMTSCNet has been tuned before and performs the ablation study.<br>
 <br>
 
 **DISCLAIMER:** The values displayed for the commands represent the default values.<br>
