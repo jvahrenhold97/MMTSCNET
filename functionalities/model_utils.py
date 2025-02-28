@@ -25,11 +25,12 @@ from keras.layers import Layer
 from keras.engine.input_spec import InputSpec
 from keras import backend as K
 from keras.losses import CategoricalCrossentropy
-
+from functionalities import main_functions
+import time
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 from keras import mixed_precision
-policy = mixed_precision.Policy('mixed_float16')
+policy = mixed_precision.set_global_policy('float32')
 mixed_precision.set_global_policy(policy)
 tf.config.experimental.set_memory_growth(tf.config.list_physical_devices('GPU')[0], True)
 
@@ -850,7 +851,7 @@ class DataGenerator(Sequence):
             return [X_pc_batch, X_img_f_batch, X_img_s_batch, X_metrics_batch], y_batch
     def on_epoch_end(self):
         with tf.device('/CPU:0'):
-            np.random.shuffle(self.indices)       
+            np.random.shuffle(self.indices)
 
 class PointCloudExtractor(tf.keras.layers.Layer):
     """
@@ -981,7 +982,7 @@ class EfficientNetModel(tf.keras.layers.Layer):
         base_model = EfficientNetV2S(include_top=False, input_shape=self.img_input_shape, pooling='avg')
         for layer in base_model.layers:
             layer.trainable = False
-        for layer in base_model.layers[-20:]:
+        for layer in base_model.layers[-15:]:
             layer.trainable = True
         self.base_model = base_model
         self.layer_norm = LayerNormalization()
@@ -1197,8 +1198,6 @@ class CombinedModel(HyperModel):
         image_input_1 = tf.keras.Input(shape=self.image_shape, name='image_input_1')
         image_input_2 = tf.keras.Input(shape=self.image_shape, name='image_input_2')
         metrics_input = tf.keras.Input(shape=self.metrics_shape, name='metrics_input')
-        image_input_1 = tf.cast(image_input_1, dtype=tf.float32)
-        image_input_2 = tf.cast(image_input_2, dtype=tf.float32)
         pointnet_branch = PointCloudExtractor(self.num_points, hp)(pointnet_input)
         image_branch_1 = EfficientNetModel(self.image_shape)(image_input_1)
         image_branch_2 = EfficientNetModel(self.image_shape)(image_input_2)
@@ -1211,7 +1210,7 @@ class CombinedModel(HyperModel):
         fusion_features = Concatenate()([pointnet_branch, image_branch_1, image_branch_2, metrics_branch])
         attention_scores = Dense(128, activation="swish", kernel_regularizer=L1L2(l1=regularizer_value_clss/1.5, l2=regularizer_value_clss))(fusion_features)
         context_vector = Dense(4, activation=None)(Concatenate()([attention_scores, fusion_features]))
-        attention_weights = Activation("softmax", name="attention_weights")(context_vector)  
+        attention_weights = Activation("softmax", name="attention_weights")(context_vector)
         pointnet_weight, image1_weight, image2_weight, metrics_weight = tf.split(attention_weights, 4, axis=-1)
         pointnet_branch = Multiply()([pointnet_branch, pointnet_weight])
         image_branch_1 = Multiply()([image_branch_1, image1_weight])
@@ -1259,9 +1258,680 @@ class CombinedModel(HyperModel):
     def from_config(cls, config):
         return cls(**config)
     
+class CombinedModelNoDMS(HyperModel):
+    """
+    Defines the MMTSCNet architecture for multimodal tree species classification.
+
+    This model:
+    - Combines features from point clouds, images, and numerical metrics.
+    - Utilizes specialized feature extractors:
+        - `PointCloudExtractor` for point cloud data.
+        - `EfficientNetModel` for image inputs.
+        - `EnhancedMetricsModel` for numerical data.
+    - Implements an attention-based fusion mechanism for modality weighting.
+    - Uses residual dense blocks for classification.
+    - Applies Focal Loss for class imbalance and includes multiple evaluation metrics.
+
+    Args:
+        point_cloud_shape (tuple): Shape of the input point cloud data.
+        image_shape (tuple): Shape of the input image data.
+        metrics_shape (tuple): Shape of the numerical feature input.
+        num_classes (int): Number of output classes.
+        num_points (int): Number of points in the point cloud input.
+    """
+    def __init__(self, point_cloud_shape, image_shape, metrics_shape, num_classes, num_points, **kwargs):
+        super(CombinedModelNoDMS, self).__init__(**kwargs)
+        self.point_cloud_shape = point_cloud_shape
+        self.image_shape = image_shape
+        self.metrics_shape = metrics_shape
+        self.num_classes = num_classes
+        self.num_points = num_points
+    def build(self, hp):
+        pointnet_input = tf.keras.Input(shape=self.point_cloud_shape, name='pointnet_input')
+        image_input_1 = tf.keras.Input(shape=self.image_shape, name='image_input_1')
+        image_input_2 = tf.keras.Input(shape=self.image_shape, name='image_input_2')
+        metrics_input = tf.keras.Input(shape=self.metrics_shape, name='metrics_input')
+        pointnet_branch = PointCloudExtractor(self.num_points, hp)(pointnet_input)
+        image_branch_1 = EfficientNetModel(self.image_shape)(image_input_1)
+        image_branch_2 = EfficientNetModel(self.image_shape)(image_input_2)
+        metrics_branch = EnhancedMetricsModel(hp)(metrics_input)
+        projection_units = hp.Choice('projection_units', [64, 128, 192])
+        num_dense = hp.Choice('clss_depth', [2, 3])  
+        units_dense = hp.Choice('clss_units', [128, 256, 512])
+        dropout_clss = hp.Float('clss_dropout_rate', min_value=0.2, max_value=0.35, step=0.025)
+        regularizer_value_clss = hp.Float('clss_regularization', min_value=0.00001, max_value=0.002, step=0.00001)
+        pointnet_branch = Dense(projection_units, activation=None, name="pce_projection")(pointnet_branch)
+        image_branch_1 = Dense(projection_units, activation=None, name="img1_projection")(image_branch_1)
+        image_branch_2 = Dense(projection_units, activation=None, name="img2_projection")(image_branch_2)
+        metrics_branch = Dense(projection_units, activation=None, name="metrics_projection")(metrics_branch)
+        x = Concatenate(name="concat_all")([pointnet_branch, image_branch_1, image_branch_2, metrics_branch])
+        for i in range(1, num_dense + 1):
+            units = max(16, (units_dense // (2**i)) - ((units_dense // (2**i)) % 8))
+            x = residual_dense_block(x, units, dropout_clss, regularizer_value_clss, f"clss_block_{i}")
+        output = Dense(self.num_classes, activation='softmax', name='output')(x)
+        model = Model(inputs=[pointnet_input, image_input_1, image_input_2, metrics_input], outputs=output)
+        initial_learning_rate = hp.Choice('learning_rate', [1e-4, 7.5e-5, 5e-5, 2.5e-5, 1e-5])
+        model.compile(optimizer=Adam(learning_rate=initial_learning_rate, clipnorm=0.5),
+                      loss=focal_loss(alpha=0.25, gamma=2.0),
+                      metrics=['accuracy', tf.keras.metrics.Precision(name="precision"), tf.keras.metrics.Recall(name="recall"), tf.keras.metrics.AUC(name="pr_curve", curve="PR"), tf.keras.metrics.PrecisionAtRecall(0.85, name="pr_at_rec"), tf.keras.metrics.RecallAtPrecision(0.85, name="rec_at_pr")])
+        trainable_params = np.sum([K.count_params(w) for w in model.trainable_weights])
+        param_memory = (trainable_params * 3.0) / (1024 * 1024)
+        activation_memory = param_memory * 2.0
+        gradient_memory = param_memory
+        optimizer_memory = param_memory * 2.0
+        total_memory = param_memory + activation_memory + gradient_memory + optimizer_memory
+        logging.info("Trainable Parameters: %s - Estimated VRAM usage: %s MB", trainable_params, total_memory)
+        return model
+    def get_untrained_model(self, best_hyperparameters):
+        return self.build(best_hyperparameters)
+    def get_config(self):
+        config = super(CombinedModel, self).get_config()
+        config.update({
+            'point_cloud_shape': self.point_cloud_shape,
+            'image_shape': self.image_shape,
+            'metrics_shape': self.metrics_shape,
+            'num_classes': self.num_classes,
+            'num_points': self.num_points
+        })
+        return config
+    @classmethod
+    def from_config(cls, config):
+        return cls(**config)
     
+class CombinedModelAblation(HyperModel):
+    """
+    Defines the MMTSCNet architecture for multimodal tree species classification.
 
+    Args:
+        point_cloud_shape (tuple): Shape of the input point cloud data.
+        image_shape (tuple): Shape of the input image data.
+        metrics_shape (tuple): Shape of the numerical feature input.
+        num_classes (int): Number of output classes.
+        num_points (int): Number of points in the point cloud input.
+        disabled_branches (list): List of branch names to disable (e.g., ["image_input_2", "metrics_input"]).
+    """
+    def __init__(self, point_cloud_shape, image_shape, metrics_shape, num_classes, num_points, disabled_branches=None, **kwargs):
+        super(CombinedModelAblation, self).__init__(**kwargs)
+        self.point_cloud_shape = point_cloud_shape
+        self.image_shape = image_shape
+        self.metrics_shape = metrics_shape
+        self.num_classes = num_classes
+        self.num_points = num_points
+        self.disabled_branches = disabled_branches if disabled_branches else []
 
+    def build(self, hp):
+        inputs = {}
+        if "pointnet_input" not in self.disabled_branches:
+            inputs["pointnet_input"] = tf.keras.Input(shape=self.point_cloud_shape, name="pointnet_input")
+        if "image_input_1" not in self.disabled_branches:
+            inputs["image_input_1"] = tf.keras.Input(shape=self.image_shape, name="image_input_1")
+        if "image_input_2" not in self.disabled_branches:
+            inputs["image_input_2"] = tf.keras.Input(shape=self.image_shape, name="image_input_2")
+        if "metrics_input" not in self.disabled_branches:
+            inputs["metrics_input"] = tf.keras.Input(shape=self.metrics_shape, name="metrics_input")
+
+        branches = {}
+        if "pointnet_input" in inputs:
+            branches["pointnet_branch"] = PointCloudExtractor(self.num_points, hp)(inputs["pointnet_input"])
+        if "image_input_1" in inputs:
+            branches["image_branch_1"] = EfficientNetModel(self.image_shape)(inputs["image_input_1"])
+        if "image_input_2" in inputs:
+            branches["image_branch_2"] = EfficientNetModel(self.image_shape)(inputs["image_input_2"])
+        if "metrics_input" in inputs:
+            branches["metrics_branch"] = EnhancedMetricsModel(hp)(inputs["metrics_input"])
+
+        projection_units = hp.Choice('projection_units', [64, 128, 192])
+        num_dense = hp.Choice('clss_depth', [2, 3])  
+        units_dense = hp.Choice('clss_units', [128, 256, 512])
+        dropout_clss = hp.Float('clss_dropout_rate', min_value=0.2, max_value=0.35, step=0.025)
+        regularizer_value_clss = hp.Float('clss_regularization', min_value=0.00001, max_value=0.002, step=0.00001)
+
+        active_branches = list(branches.values())
+        fusion_features = Concatenate(name="concat_all")(active_branches) if len(active_branches) > 1 else active_branches[0]
+
+        attention_scores = Dense(128, activation="swish", kernel_regularizer=L1L2(l1=regularizer_value_clss/1.5, l2=regularizer_value_clss))(fusion_features)
+        context_vector = Dense(len(active_branches), activation=None)(Concatenate()([attention_scores, fusion_features]))
+        attention_weights = Activation("softmax", name="attention_weights")(context_vector)
+
+        weighted_branches = []
+        attention_splits = tf.split(attention_weights, len(active_branches), axis=-1)
+        for i, (branch_name, branch_tensor) in enumerate(branches.items()):
+            weighted_branch = Multiply()([branch_tensor, attention_splits[i]])
+            weighted_branch = weighted_branch * (attention_splits[i] + 1)
+            weighted_branches.append(Dense(projection_units, activation=None, name=f"{branch_name}_projection")(weighted_branch))
+
+        x = Concatenate()(weighted_branches) if len(weighted_branches) > 1 else weighted_branches[0]
+        for i in range(1, num_dense + 1):
+            units = max(16, (units_dense // (2**i)) - ((units_dense // (2**i)) % 8))
+            x = residual_dense_block(x, units, dropout_clss, regularizer_value_clss, f"clss_block_{i}")
+
+        output = Dense(self.num_classes, activation='softmax', name='output')(x)
+
+        model = Model(inputs=list(inputs.values()), outputs=output)
+        initial_learning_rate = hp.Choice('learning_rate', [1e-4, 7.5e-5, 5e-5, 2.5e-5, 1e-5])
+        model.compile(optimizer=Adam(learning_rate=initial_learning_rate, clipnorm=0.5),
+                      loss=focal_loss(alpha=0.25, gamma=2.0),
+                      metrics=['accuracy', tf.keras.metrics.Precision(name="precision"), tf.keras.metrics.Recall(name="recall"),
+                               tf.keras.metrics.AUC(name="pr_curve", curve="PR"), 
+                               tf.keras.metrics.PrecisionAtRecall(0.85, name="pr_at_rec"), 
+                               tf.keras.metrics.RecallAtPrecision(0.85, name="rec_at_pr")])
+        return model
+
+    def get_untrained_model(self, best_hyperparameters):
+        return self.build(best_hyperparameters)
+
+    def get_config(self):
+        config = super(CombinedModelAblation, self).get_config()
+        config.update({
+            'point_cloud_shape': self.point_cloud_shape,
+            'image_shape': self.image_shape,
+            'metrics_shape': self.metrics_shape,
+            'num_classes': self.num_classes,
+            'num_points': self.num_points,
+            'disabled_branches': self.disabled_branches
+        })
+        return config
+
+    @classmethod
+    def from_config(cls, config):
+        return cls(**config)
+    
+class DataGenerator1(Sequence):
+    """
+    Custom data generator for batch processing in TensorFlow/Keras.
+
+    This generator:
+    - Handles multimodal input data (point clouds, images, numerical metrics).
+    - Generates batches of data for efficient training.
+    - Shuffles data at the end of each epoch to improve generalization.
+
+    Args:
+        X_pc (ndarray): Point cloud data.
+        X_img_f (ndarray): Frontal image data.
+        X_img_s (ndarray): Sideways image data.
+        X_metrics (ndarray): Numerical feature set.
+        y (ndarray): One-hot encoded class labels.
+        batch_size (int): Number of samples per batch.
+
+    Returns:
+        tuple: A batch of input data and corresponding labels.
+    """
+    def __init__(self, X_pc, y, batch_size):
+        self.X_pc = np.array(X_pc)
+        self.y = np.array(y)
+        self.batch_size = batch_size
+        self.indices = np.arange(len(y))
+        self.on_epoch_end()
+    def __len__(self):
+        with tf.device('/CPU:0'):
+            return int(np.floor(len(self.y) / float(self.batch_size)))
+    def __getitem__(self, index):
+        with tf.device('/CPU:0'):
+            batch_indices = self.indices[index * self.batch_size:(index + 1) * self.batch_size]
+            X_pc_batch = self.X_pc[batch_indices]
+            y_batch = self.y[batch_indices]
+            return [X_pc_batch], y_batch
+    def on_epoch_end(self):
+        with tf.device('/CPU:0'):
+            np.random.shuffle(self.indices)
+
+class DataGenerator2(Sequence):
+    """
+    Custom data generator for batch processing in TensorFlow/Keras.
+
+    This generator:
+    - Handles multimodal input data (point clouds, images, numerical metrics).
+    - Generates batches of data for efficient training.
+    - Shuffles data at the end of each epoch to improve generalization.
+
+    Args:
+        X_pc (ndarray): Point cloud data.
+        X_img_f (ndarray): Frontal image data.
+        X_img_s (ndarray): Sideways image data.
+        X_metrics (ndarray): Numerical feature set.
+        y (ndarray): One-hot encoded class labels.
+        batch_size (int): Number of samples per batch.
+
+    Returns:
+        tuple: A batch of input data and corresponding labels.
+    """
+    def __init__(self, X_pc, X_metrics, y, batch_size):
+        self.X_pc = np.array(X_pc)
+        self.X_metrics = np.array(X_metrics)
+        self.y = np.array(y)
+        self.batch_size = batch_size
+        self.indices = np.arange(len(y))
+        self.on_epoch_end()
+    def __len__(self):
+        with tf.device('/CPU:0'):
+            return int(np.floor(len(self.y) / float(self.batch_size)))
+    def __getitem__(self, index):
+        with tf.device('/CPU:0'):
+            batch_indices = self.indices[index * self.batch_size:(index + 1) * self.batch_size]
+            X_pc_batch = self.X_pc[batch_indices]
+            X_metrics_batch = self.X_metrics[batch_indices]
+            y_batch = self.y[batch_indices]
+            return [X_pc_batch, X_metrics_batch], y_batch
+    def on_epoch_end(self):
+        with tf.device('/CPU:0'):
+            np.random.shuffle(self.indices)
+
+class DataGenerator3(Sequence):
+    """
+    Custom data generator for batch processing in TensorFlow/Keras.
+
+    This generator:
+    - Handles multimodal input data (point clouds, images, numerical metrics).
+    - Generates batches of data for efficient training.
+    - Shuffles data at the end of each epoch to improve generalization.
+
+    Args:
+        X_pc (ndarray): Point cloud data.
+        X_img_f (ndarray): Frontal image data.
+        X_img_s (ndarray): Sideways image data.
+        X_metrics (ndarray): Numerical feature set.
+        y (ndarray): One-hot encoded class labels.
+        batch_size (int): Number of samples per batch.
+
+    Returns:
+        tuple: A batch of input data and corresponding labels.
+    """
+    def __init__(self, X_pc, X_img_f, X_img_s, y, batch_size):
+        self.X_pc = np.array(X_pc)
+        self.X_img_f = np.array(X_img_f)
+        self.X_img_s = np.array(X_img_s)
+        self.y = np.array(y)
+        self.batch_size = batch_size
+        self.indices = np.arange(len(y))
+        self.on_epoch_end()
+    def __len__(self):
+        with tf.device('/CPU:0'):
+            return int(np.floor(len(self.y) / float(self.batch_size)))
+    def __getitem__(self, index):
+        with tf.device('/CPU:0'):
+            batch_indices = self.indices[index * self.batch_size:(index + 1) * self.batch_size]
+            X_pc_batch = self.X_pc[batch_indices]
+            X_img_f_batch = self.X_img_f[batch_indices]
+            X_img_s_batch = self.X_img_s[batch_indices]
+            y_batch = self.y[batch_indices]
+            return [X_pc_batch, X_img_f_batch, X_img_s_batch], y_batch
+    def on_epoch_end(self):
+        with tf.device('/CPU:0'):
+            np.random.shuffle(self.indices)
+
+class DataGenerator4(Sequence):
+    """
+    Custom data generator for batch processing in TensorFlow/Keras.
+
+    This generator:
+    - Handles multimodal input data (point clouds, images, numerical metrics).
+    - Generates batches of data for efficient training.
+    - Shuffles data at the end of each epoch to improve generalization.
+
+    Args:
+        X_pc (ndarray): Point cloud data.
+        X_img_f (ndarray): Frontal image data.
+        X_img_s (ndarray): Sideways image data.
+        X_metrics (ndarray): Numerical feature set.
+        y (ndarray): One-hot encoded class labels.
+        batch_size (int): Number of samples per batch.
+
+    Returns:
+        tuple: A batch of input data and corresponding labels.
+    """
+    def __init__(self, X_pc, X_img_f, X_metrics, y, batch_size):
+        self.X_pc = np.array(X_pc)
+        self.X_img_f = np.array(X_img_f)
+        self.X_metrics = np.array(X_metrics)
+        self.y = np.array(y)
+        self.batch_size = batch_size
+        self.indices = np.arange(len(y))
+        self.on_epoch_end()
+    def __len__(self):
+        with tf.device('/CPU:0'):
+            return int(np.floor(len(self.y) / float(self.batch_size)))
+    def __getitem__(self, index):
+        with tf.device('/CPU:0'):
+            batch_indices = self.indices[index * self.batch_size:(index + 1) * self.batch_size]
+            X_pc_batch = self.X_pc[batch_indices]
+            X_img_f_batch = self.X_img_f[batch_indices]
+            X_metrics_batch = self.X_metrics[batch_indices]
+            y_batch = self.y[batch_indices]
+            return [X_pc_batch, X_img_f_batch, X_metrics_batch], y_batch
+    def on_epoch_end(self):
+        with tf.device('/CPU:0'):
+            np.random.shuffle(self.indices)
+
+class DataGenerator5(Sequence):
+    """
+    Custom data generator for batch processing in TensorFlow/Keras.
+
+    This generator:
+    - Handles multimodal input data (point clouds, images, numerical metrics).
+    - Generates batches of data for efficient training.
+    - Shuffles data at the end of each epoch to improve generalization.
+
+    Args:
+        X_pc (ndarray): Point cloud data.
+        X_img_f (ndarray): Frontal image data.
+        X_img_s (ndarray): Sideways image data.
+        X_metrics (ndarray): Numerical feature set.
+        y (ndarray): One-hot encoded class labels.
+        batch_size (int): Number of samples per batch.
+
+    Returns:
+        tuple: A batch of input data and corresponding labels.
+    """
+    def __init__(self, X_pc, X_img_s, X_metrics, y, batch_size):
+        self.X_pc = np.array(X_pc)
+        self.X_img_s = np.array(X_img_s)
+        self.X_metrics = np.array(X_metrics)
+        self.y = np.array(y)
+        self.batch_size = batch_size
+        self.indices = np.arange(len(y))
+        self.on_epoch_end()
+    def __len__(self):
+        with tf.device('/CPU:0'):
+            return int(np.floor(len(self.y) / float(self.batch_size)))
+    def __getitem__(self, index):
+        with tf.device('/CPU:0'):
+            batch_indices = self.indices[index * self.batch_size:(index + 1) * self.batch_size]
+            X_pc_batch = self.X_pc[batch_indices]
+            X_img_s_batch = self.X_img_s[batch_indices]
+            X_metrics_batch = self.X_metrics[batch_indices]
+            y_batch = self.y[batch_indices]
+            return [X_pc_batch, X_img_s_batch, X_metrics_batch], y_batch
+    def on_epoch_end(self):
+        with tf.device('/CPU:0'):
+            np.random.shuffle(self.indices)
+
+class DataGenerator6(Sequence):
+    """
+    Custom data generator for batch processing in TensorFlow/Keras.
+
+    This generator:
+    - Handles multimodal input data (point clouds, images, numerical metrics).
+    - Generates batches of data for efficient training.
+    - Shuffles data at the end of each epoch to improve generalization.
+
+    Args:
+        X_pc (ndarray): Point cloud data.
+        X_img_f (ndarray): Frontal image data.
+        X_img_s (ndarray): Sideways image data.
+        X_metrics (ndarray): Numerical feature set.
+        y (ndarray): One-hot encoded class labels.
+        batch_size (int): Number of samples per batch.
+
+    Returns:
+        tuple: A batch of input data and corresponding labels.
+    """
+    def __init__(self, X_pc, X_img_f, y, batch_size):
+        self.X_pc = np.array(X_pc)
+        self.X_img_f = np.array(X_img_f)
+        self.y = np.array(y)
+        self.batch_size = batch_size
+        self.indices = np.arange(len(y))
+        self.on_epoch_end()
+    def __len__(self):
+        with tf.device('/CPU:0'):
+            return int(np.floor(len(self.y) / float(self.batch_size)))
+    def __getitem__(self, index):
+        with tf.device('/CPU:0'):
+            batch_indices = self.indices[index * self.batch_size:(index + 1) * self.batch_size]
+            X_pc_batch = self.X_pc[batch_indices]
+            X_img_f_batch = self.X_img_f[batch_indices]
+            y_batch = self.y[batch_indices]
+            return [X_pc_batch, X_img_f_batch], y_batch
+    def on_epoch_end(self):
+        with tf.device('/CPU:0'):
+            np.random.shuffle(self.indices)
+
+class DataGenerator7(Sequence):
+    """
+    Custom data generator for batch processing in TensorFlow/Keras.
+
+    This generator:
+    - Handles multimodal input data (point clouds, images, numerical metrics).
+    - Generates batches of data for efficient training.
+    - Shuffles data at the end of each epoch to improve generalization.
+
+    Args:
+        X_pc (ndarray): Point cloud data.
+        X_img_f (ndarray): Frontal image data.
+        X_img_s (ndarray): Sideways image data.
+        X_metrics (ndarray): Numerical feature set.
+        y (ndarray): One-hot encoded class labels.
+        batch_size (int): Number of samples per batch.
+
+    Returns:
+        tuple: A batch of input data and corresponding labels.
+    """
+    def __init__(self, X_pc, X_img_s, y, batch_size):
+        self.X_pc = np.array(X_pc)
+        self.X_img_s = np.array(X_img_s)
+        self.y = np.array(y)
+        self.batch_size = batch_size
+        self.indices = np.arange(len(y))
+        self.on_epoch_end()
+    def __len__(self):
+        with tf.device('/CPU:0'):
+            return int(np.floor(len(self.y) / float(self.batch_size)))
+    def __getitem__(self, index):
+        with tf.device('/CPU:0'):
+            batch_indices = self.indices[index * self.batch_size:(index + 1) * self.batch_size]
+            X_pc_batch = self.X_pc[batch_indices]
+            X_img_s_batch = self.X_img_s[batch_indices]
+            y_batch = self.y[batch_indices]
+            return [X_pc_batch, X_img_s_batch], y_batch
+    def on_epoch_end(self):
+        with tf.device('/CPU:0'):
+            np.random.shuffle(self.indices)
+    
+def perform_ablation_study(modeldir, bsize, X_pc_train, X_img_1_train, X_img_2_train, X_metrics_train, y_train, X_pc_val, X_img_1_val, X_img_2_val, X_metrics_val, y_val, X_pc_pred, X_metrics_pred, X_img_1_pred, X_img_2_pred, y_pred, model_dir, label_dict, cap_sel, grow_sel, pc_size, fwf_av, img_size, num_classes, training_attv):
+    hps, optimal_lr = main_functions.get_optimal_hps(pc_size, img_size, num_classes, cap_sel, grow_sel, fwf_av, X_metrics_train, model_dir)
+    attv_list = {}
+    attv_list["attv_full"] = training_attv.tolist()
+    print(training_attv)
+    point_cloud_shape = (pc_size, 3)
+    image_shape = (img_size, img_size, 3)
+    metrics_shape = (X_metrics_train.shape[1],)
+    X_img_1_train, X_img_2_train, X_pc_train, X_metrics_train = normalize_data(X_pc_train, X_img_1_train, X_img_2_train, X_metrics_train)
+    X_img_1_val, X_img_2_val, X_pc_val, X_metrics_val = normalize_data(X_pc_val, X_img_1_val, X_img_2_val, X_metrics_val)
+    X_img_1_pred, X_img_2_pred, X_pc_pred, X_metrics_pred = normalize_data(X_pc_pred, X_img_1_pred, X_img_2_pred, X_metrics_pred)
+    check_data(X_pc_train, X_img_1_train, X_img_2_train, X_metrics_train, y_train)
+    check_data(X_pc_val, X_img_1_val, X_img_2_val, X_metrics_val, y_val)
+    check_data(X_pc_pred, X_img_1_pred, X_img_2_pred, X_metrics_pred, y_pred)
+    corruption_found = check_label_corruption(y_train)
+    if not corruption_found:
+        logging.info("No corruption found in one-hot encoded labels!")
+    corruption_found = check_label_corruption(y_val)
+    if not corruption_found:
+        logging.info("No corruption found in one-hot encoded labels!")
+    for i in range(0, 7):
+        if i == 0:
+            X_sample = [
+                np.array(X_pc_val[:1], dtype=np.float32),
+                np.array(X_img_1_val[:1], dtype=np.float32),
+                np.array(X_img_2_val[:1], dtype=np.float32),
+            ]
+            disabled_branches = ["metrics_input"]
+            train_gen = DataGenerator3(X_pc_train, X_img_1_train, X_img_2_train, y_train, bsize)
+            val_gen = DataGenerator3(X_pc_val, X_img_1_val, X_img_2_val, y_val, bsize)
+        elif i == 1:
+            X_sample = [
+                np.array(X_pc_val[:1], dtype=np.float32),
+                np.array(X_img_2_val[:1], dtype=np.float32),
+                np.array(X_metrics_val[:1], dtype=np.float32),
+            ]
+            disabled_branches = ["image_input_1"]
+            train_gen = DataGenerator5(X_pc_train, X_img_2_train, X_metrics_train, y_train, bsize)
+            val_gen = DataGenerator5(X_pc_val, X_img_2_val, X_metrics_val, y_val, bsize)
+        elif i == 2:
+            X_sample = [
+                np.array(X_pc_val[:1], dtype=np.float32),
+                np.array(X_img_1_val[:1], dtype=np.float32),
+                np.array(X_metrics_val[:1], dtype=np.float32),
+            ]
+            disabled_branches = ["image_input_2"]
+            train_gen = DataGenerator4(X_pc_train, X_img_1_train, X_metrics_train, y_train, bsize)
+            val_gen = DataGenerator4(X_pc_val, X_img_1_val, X_metrics_val, y_val, bsize)
+        elif i == 3:
+            X_sample = [
+                np.array(X_pc_val[:1], dtype=np.float32),
+                np.array(X_metrics_val[:1], dtype=np.float32),
+            ]
+            disabled_branches = ["image_input_1", "image_input_2"]
+            train_gen = DataGenerator2(X_pc_train, X_metrics_train, y_train, bsize)
+            val_gen = DataGenerator2(X_pc_val, X_metrics_val, y_val, bsize)
+        elif i == 4:
+            X_sample = [
+                np.array(X_pc_val[:1], dtype=np.float32),
+                np.array(X_img_1_val[:1], dtype=np.float32),
+            ]
+            disabled_branches = ["image_input_2", "metrics_input"]
+            train_gen = DataGenerator6(X_pc_train, X_img_1_train, y_train, bsize)
+            val_gen = DataGenerator6(X_pc_val, X_img_1_val, y_val, bsize)
+        elif i == 5:
+            X_sample = [
+                np.array(X_pc_val[:1], dtype=np.float32),
+                np.array(X_img_2_val[:1], dtype=np.float32),
+            ]
+            disabled_branches = ["image_input_1", "metrics_input"]
+            train_gen = DataGenerator7(X_pc_train, X_img_2_train, y_train, bsize)
+            val_gen = DataGenerator7(X_pc_val, X_img_2_val, y_val, bsize)
+        else:
+            X_sample = [
+                np.array(X_pc_val[:1], dtype=np.float32),
+            ]
+            disabled_branches = ["image_input_1", "image_input_2", "metrics_input"]
+            train_gen = DataGenerator1(X_pc_train, y_train, bsize)
+            val_gen = DataGenerator1(X_pc_val, y_val, bsize)
+        combined_ablation_model = CombinedModelAblation(point_cloud_shape, image_shape, metrics_shape, num_classes, pc_size, disabled_branches=disabled_branches)
+        untrained_model = combined_ablation_model.get_untrained_model(hps)
+        untrained_model.summary()
+        train_gen.on_epoch_end()
+        val_gen.on_epoch_end()
+        early_stopping = tf.keras.callbacks.EarlyStopping(monitor='val_accuracy', patience=12, restore_best_weights=True)
+        degrade_lr = tf.keras.callbacks.LearningRateScheduler(scheduler)
+        history = untrained_model.fit(
+            train_gen,
+            epochs=300,
+            validation_data=val_gen,
+            callbacks=[early_stopping, degrade_lr],
+            verbose=1
+        )
+        attention_layer = untrained_model.get_layer("attention_weights")
+        attention_model = tf.keras.Model(inputs=untrained_model.input, outputs=attention_layer.output)
+        attention_values = attention_model.predict(X_sample)
+        print("Extracted Attention Weights (Real Values):")
+        attv = attention_values.astype(np.float32)
+        attv_list[f"attv_config_{i}"] = np.array(attv, dtype=np.float32).tolist()
+        print(attv)
+        path = os.path.join(modeldir, time.strftime("%Y%m%d-%H%M%S"))
+        os.mkdir(path)
+        predict_for_data_ablation(untrained_model, X_pc_pred, X_metrics_pred, X_img_1_pred, X_img_2_pred, y_pred, label_dict, cap_sel, grow_sel, pc_size, path, i)
+    print(attv_list)
+    combined_ablation_model_nodms = CombinedModelNoDMS(point_cloud_shape, image_shape, metrics_shape, num_classes, pc_size)
+    untrained_model_nodms = combined_ablation_model_nodms.get_untrained_model(hps)
+    untrained_model_nodms.summary()
+    train_gen = DataGenerator(X_pc_train, X_img_1_train, X_img_2_train, X_metrics_train, y_train, bsize)
+    val_gen = DataGenerator(X_pc_val, X_img_1_train, X_img_2_val, X_metrics_val, y_val, bsize)
+    train_gen.on_epoch_end()
+    val_gen.on_epoch_end()
+    early_stopping = tf.keras.callbacks.EarlyStopping(monitor='val_accuracy', patience=12, restore_best_weights=True)
+    degrade_lr = tf.keras.callbacks.LearningRateScheduler(scheduler)
+    history = untrained_model_nodms.fit(
+        train_gen,
+        epochs=300,
+        validation_data=val_gen,
+        callbacks=[early_stopping, degrade_lr],
+        verbose=1
+    )
+    plot_path = os.path.join(modeldir, time.strftime("%Y%m%d-%H%M%S"))
+    os.mkdir(plot_path)
+    predict_for_data(untrained_model_nodms, X_pc_val, X_metrics_val, X_img_1_val, X_img_2_val, y_val, X_pc_pred, X_metrics_pred, X_img_1_pred, X_img_2_pred, y_pred, label_dict, model_dir, cap_sel, grow_sel, pc_size, plot_path)
+
+def predict_for_data_ablation(trained_model, X_pc_pred, X_metrics_pred, X_img_1_pred, X_img_2_pred, y_pred, label_dict, capsel, growsel, netpcsize, plot_path, index):
+    """
+    Performs predictions on validation and test datasets using a trained MMTSCNet model.
+
+    This function:
+    - Normalizes input features before inference.
+    - Runs multiple predictions to reduce variance (Monte Carlo estimation).
+    - Converts one-hot encoded predictions into real class labels.
+    - Generates and saves confusion matrices for validation and test data.
+
+    Args:
+        trained_model (tf.keras.Model): Trained instance of MMTSCNet.
+        X_pc_val (ndarray): Validation set - point clouds.
+        X_metrics_val (ndarray): Validation set - numerical features.
+        X_img_1_val (ndarray): Validation set - frontal images.
+        X_img_2_val (ndarray): Validation set - sideways images.
+        y_val (ndarray): Ground truth labels for validation set.
+        X_pc_pred (ndarray): Test set - point clouds.
+        X_metrics_pred (ndarray): Test set - numerical features.
+        X_img_1_pred (ndarray): Test set - frontal images.
+        X_img_2_pred (ndarray): Test set - sideways images.
+        y_pred (ndarray): Ground truth labels for test set.
+        label_dict (dict): Dictionary mapping one-hot labels to textual labels.
+        modeldir (str): Directory where trained models are stored.
+        capsel (str): Acquisition method selection.
+        growsel (str): Leaf-condition selection.
+        netpcsize (int): Number of points per resampled point cloud.
+        plot_path (str): Path to save confusion matrix plots.
+
+    Returns:
+        None (Confusion matrices are saved to disk).
+    """
+    pred_results = np.zeros_like(y_pred)
+    if index == 0:
+        for _ in range(10):
+            predictions = trained_model.predict(
+                [X_pc_pred, X_img_1_pred, X_img_2_pred], batch_size=8, verbose=1
+            )
+            pred_results += predictions
+    elif index == 1:
+        for _ in range(10):
+            predictions = trained_model.predict(
+                [X_pc_pred, X_img_2_pred, X_metrics_pred], batch_size=8, verbose=1
+            )
+            pred_results += predictions
+    elif index == 2:
+        for _ in range(10):
+            predictions = trained_model.predict(
+                [X_pc_pred, X_img_1_pred, X_metrics_pred], batch_size=8, verbose=1
+            )
+            pred_results += predictions
+    elif index == 3:
+        for _ in range(10):
+            predictions = trained_model.predict(
+                [X_pc_pred, X_metrics_pred], batch_size=8, verbose=1
+            )
+            pred_results += predictions
+    elif index == 4:
+        for _ in range(10):
+            predictions = trained_model.predict(
+                [X_pc_pred, X_img_1_pred], batch_size=8, verbose=1
+            )
+            pred_results += predictions
+    elif index == 5:
+        for _ in range(10):
+            predictions = trained_model.predict(
+                [X_pc_pred, X_img_2_pred], batch_size=8, verbose=1
+            )
+            pred_results += predictions
+    else:
+        for _ in range(10):
+            predictions = trained_model.predict(
+                [X_pc_pred], batch_size=8, verbose=1
+            )
+            pred_results += predictions
+    pred_results /= 10
+    y_pred_real = map_onehot_to_real(pred_results, label_dict)
+    y_true_real = map_onehot_to_real(y_pred, label_dict)   
+    plot_conf_matrix(
+        y_true_real, y_pred_real, f"ABLATION_PRED_{index}", plot_path, label_dict, capsel, growsel, netpcsize
+    ) 
 
 
 # ------------------------------- MIT License ----------------------------------

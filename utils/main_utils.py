@@ -51,10 +51,10 @@ def parse_arguments():
                         help='Ratio for validation data. Range: [0.05 - 0.5]',
                         type=float, default=0.20)
     parser.add_argument('--capsel',
-                        help='[ALS | TLS | ULS | ALL] - Which capture method should be used for training.',
+                        help='[ALS | TLS | ULS] - Which capture method should be used for training.',
                         type=str, default="ULS")
     parser.add_argument('--growsel',
-                        help='[LEAF-ON | LEAF-OFF | ALL] - Which growth period should be used for training.',
+                        help='[LEAF-ON | LEAF-OFF] - Which growth period should be used for training.',
                         type=str, default="LEAF-ON")
     parser.add_argument('--batchsize',
                         help='4, 8, 16, 32, ... always use Power of Two!',
@@ -87,8 +87,8 @@ def validate_inputs(datadir, workdir, modeldir, elimper, maxpcscale, ssstest, ca
         elimper (float): Percentage threshold for species elimination (0-99).
         maxpcscale (float): Maximum scaling factor for point cloud augmentation (0.01-0.3).
         ssstest (float): Train-test split ratio (0.05-0.5).
-        capsel (str): Capture selection method [ALS | TLS | ULS | ALL].
-        growsel (str): Growth condition selection [LEAF-ON | LEAF-OFF | ALL].
+        capsel (str): Capture selection method [ALS | TLS | ULS.
+        growsel (str): Growth condition selection [LEAF-ON | LEAF-OFF].
         batchsize (int): Training batch size [4 | 8 | 16 | 32].
         numpoints (int): Number of points per point cloud [512 | 1024 | 2048 | 4096].
 
@@ -126,15 +126,15 @@ def validate_inputs(datadir, workdir, modeldir, elimper, maxpcscale, ssstest, ca
     else:
         logging.error("Train-Test ratio is too large/small! Exiting now!")
         sys.exit(1)
-    if capsel == "ALS" or capsel == "ULS" or capsel == "TLS" or capsel == "ALL":
+    if capsel == "ALS" or capsel == "ULS" or capsel == "TLS":
         cap_sel = capsel
     else:
-        logging.error("Capture selection can only be [ALS | TLS | ULS | ALL]! Exiting now!")
+        logging.error("Capture selection can only be [ALS | TLS | ULS]! Exiting now!")
         sys.exit(1)
-    if growsel == "LEAF-ON" or growsel == "LEAF-OFF" or growsel == "ALL":
+    if growsel == "LEAF-ON" or growsel == "LEAF-OFF":
         grow_sel = growsel
     else:
-        logging.error("Growth selection can only be [LEAF-ON | LEAF-OFF | ALL]! Exiting now!")
+        logging.error("Growth selection can only be [LEAF-ON | LEAF-OFF]! Exiting now!")
         sys.exit(1)
     if batchsize == 4 or batchsize == 8 or batchsize == 10 or batchsize == 12 or batchsize == 16 or batchsize == 32:
         bsize = batchsize

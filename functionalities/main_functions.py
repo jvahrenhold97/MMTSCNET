@@ -337,10 +337,21 @@ def perform_training(model, bsz, X_pc_train, X_img_1_train, X_img_2_train, X_met
         train_gen,
         epochs=300,
         validation_data=val_gen,
-        
         callbacks=[early_stopping, degrade_lr],
         verbose=1
     )
+    X_sample = [
+        np.array(X_pc_val[:1], dtype=np.float32),
+        np.array(X_img_1_val[:1], dtype=np.float32),
+        np.array(X_img_2_val[:1], dtype=np.float32),
+        np.array(X_metrics_val[:1], dtype=np.float32),
+    ]
+    attention_layer = model.get_layer("attention_weights")
+    attention_model = tf.keras.Model(inputs=model.input, outputs=attention_layer.output)
+    attention_values = attention_model.predict(X_sample)
+    print("Extracted Attention Weights (Real Values):")
+    attv = attention_values.astype(np.float32)
+    print(attv)
     plot_path = model_utils.plot_and_save_history(history, modeldir, capsel, growsel, netpcsize, fwf_av)
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     if fwf_av == True:
@@ -359,7 +370,7 @@ def perform_training(model, bsz, X_pc_train, X_img_1_train, X_img_2_train, X_met
     trained_model = model_utils.load_trained_model_from_folder(model_path)
     keras.backend.clear_session()
     gc.collect()
-    return trained_model, plot_path
+    return trained_model, plot_path, attv
 
 def build_mmtscnet_with_optimal_hps(netpcsize, netimgsize, num_classes, cap_sel, grow_sel, fwf_av, X_metrics_train, modeldir):
     """
@@ -393,6 +404,36 @@ def build_mmtscnet_with_optimal_hps(netpcsize, netimgsize, num_classes, cap_sel,
     untrained_model = combined_model.get_untrained_model(best_hyperparameters)
     untrained_model.summary()
     return untrained_model, optimal_lr
+
+def get_optimal_hps(netpcsize, netimgsize, num_classes, cap_sel, grow_sel, fwf_av, X_metrics_train, modeldir):
+    """
+    Builds an untrained MMTSCNet model using the best-found hyperparameters.
+
+    This function:
+    - Defines input shapes based on network parameters.
+    - Retrieves optimal hyperparameters and learning rate.
+    - Initializes an untrained MMTSCNet model with the optimal configuration.
+
+    Args:
+        netpcsize (int): Number of points per point cloud.
+        netimgsize (int): Image size in pixels.
+        num_classes (int): Number of classification categories.
+        cap_sel (str): Acquisition selection criteria.
+        grow_sel (str): Leaf-condition selection criteria.
+        fwf_av (bool): Indicates whether Full Waveform (FWF) data is available.
+        X_metrics_train (ndarray): Training numerical feature data.
+        modeldir (str): Directory where model configurations are stored.
+
+    Returns:
+        tuple:
+            - untrained_model (tf.keras.Model): Model initialized with optimal hyperparameters.
+            - optimal_lr (float): Best learning rate found for the configuration.
+    """
+    point_cloud_shape = (netpcsize, 3)
+    image_shape = (netimgsize, netimgsize, 3)
+    metrics_shape = (X_metrics_train.shape[1],)
+    best_hyperparameters, optimal_lr = predef_mmtscnet.get_hyperparams_for_config(num_classes, cap_sel, grow_sel, fwf_av, point_cloud_shape, image_shape, metrics_shape, netpcsize, modeldir)
+    return best_hyperparameters, optimal_lr
 
 
 
